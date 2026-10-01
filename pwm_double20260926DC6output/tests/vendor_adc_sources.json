@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/STMicroelectronics/STM32CubeF4",
+  "tag": "v1.27.1",
+  "driver_version": "1.8.1 (existing project version)",
+  "source_url_prefix": "https://raw.githubusercontent.com/STMicroelectronics/STM32CubeF4/v1.27.1/Drivers/STM32F4xx_HAL_Driver/",
+  "normalization": "LF line endings; exactly one terminal newline; no code changes",
+  "sha256": {
+    "Inc/stm32f4xx_hal_adc.h": "1cf54f807060e968b173a8dd2e03916df5c98e006b9ccb332ec80880da1a12af",
+    "Inc/stm32f4xx_hal_adc_ex.h": "4849aed0305b93bcbfb598b45bd360cc69e63788507d8160d8b55451f4130fdd",
+    "Inc/stm32f4xx_ll_adc.h": "980bf63b9c36f544538a1d1a23a22d3abdd9f378e88d935824e9ae1dd83526b3",
+    "Src/stm32f4xx_hal_adc.c": "6957cd083fd71e2b2ff88022d8ccab7b48a1392f355fc8aff8161e9fa8498354",
+    "Src/stm32f4xx_hal_adc_ex.c": "9f832231c5dd94c2855800dc5b8ce6e545dc110983497f8d5e94ced08536ec7c"
+  }
+}

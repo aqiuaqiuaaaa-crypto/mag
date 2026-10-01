@@ -1,0 +1,41 @@
+# Python caches and virtual environments
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# Keil / ARM build outputs
+Objects/
+Listings/
+*.axf
+*.hex
+*.bin
+*.map
+*.o
+*.d
+*.crf
+*.lnp
+*.lst
+
+# Confirmed Keil build reports and dependency/debug state
+# Keep the linker scatter file (*.sct) in this output directory.
+/pwm_double20260926DC6output/MDK-ARM/pwm_02/*.build_log.htm
+/pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.htm
+/pwm_double20260926DC6output/MDK-ARM/pwm_02/*.dep
+/pwm_double20260926DC6output/MDK-ARM/pwm_02/ExtDll.iex
+
+# Keil per-user workspace state
+*.uvguix.*
+*.uvgui.*
+
+# Common temporary and operating-system files
+*.tmp
+*.bak
+~$*
+Thumbs.db
+.DS_Store
+
+# Preserve source, project settings, models, documentation and reference data.
+# In particular: *.c, *.h, *.py, *.json, *.md, *.uvprojx, *.uvoptx,
+# *.ioc, *.s, *.sct, *.dbgconf, .mxproject and RTE files stay versioned.
