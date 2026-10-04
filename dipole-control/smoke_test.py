@@ -1,20 +1,22 @@
-# -*- coding: utf-8 -*-
 """无头冒烟测试：不依赖相机/串口，验证 GUI 类与控制链路（约 30Hz 控制帧）"""
+
 import os
+
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
 import csv
-from unittest.mock import patch
-import time
-import numpy as np
-from numpy.typing import NDArray
-import cv2
-from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
-
-import magnetic_dipole_pid as m
 
 # 关键：把设置文件隔离到临时路径，避免读入/覆盖用户真实保存的 GUI 参数
 import tempfile
+import time
+from unittest.mock import patch
+
+import cv2
+import magnetic_dipole_pid as m
+import numpy as np
+from numpy.typing import NDArray
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
+
 settings_dir = tempfile.TemporaryDirectory(prefix="mpc_smoke_")
 m.SETTINGS_FILE = os.path.join(settings_dir.name, "gui_settings.json")
 
@@ -50,8 +52,9 @@ assert w.video.width() < m.cfg.DISP_W, "视频区应随小窗口收缩"
 assert abs(w.video.width() / w.video.height() - 16.0 / 9.0) < 0.05
 central_widget = w.centralWidget()
 assert central_widget is not None
-assert w.control_scroll.geometry().right() <= central_widget.width(), \
-    "控制面板不得被挤到窗口右侧之外"
+assert (
+    w.control_scroll.geometry().right() <= central_widget.width()
+), "控制面板不得被挤到窗口右侧之外"
 
 # 模型严格校验通过，自动控制可用
 assert w.model_ok, f"模型应可用: {w.model_err}"
@@ -79,8 +82,9 @@ w.spin_bdir_y.setValue(1.0)
 w.spin_bdir_z.setValue(0.0)
 w.spin_bmag.setValue(12.0)
 rec_bf = w._solve_motion_target(np.zeros(3), np.array([10e-6, 0.0, 0.0]))
-assert np.allclose(rec_bf["requested_B_direction"],
-                   np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0))
+assert np.allclose(
+    rec_bf["requested_B_direction"], np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+)
 assert rec_bf["requested_B_magnitude_mT"] == 12.0
 w.spin_bdir_x.setValue(m.cfg.CONTROL_FIELD_DIRECTION[0])
 w.spin_bdir_y.setValue(m.cfg.CONTROL_FIELD_DIRECTION[1])
@@ -108,7 +112,7 @@ w.start_tracking()
 assert w.worker is not None and w.worker.is_alive()
 assert not w.chk_cur_live.isChecked(), "开始追踪应自动退出手动电流实时发送"
 assert not w.chk_force_live.isChecked()
-w.estimate_state(0.033, True)          # 初始化状态估计器到磁珠当前位置
+w.estimate_state(0.033, True)  # 初始化状态估计器到磁珠当前位置
 print("full_path 点数:", len(w.full_path))
 
 # 闭环模拟：磁珠以 F_des/阻力系数 稳态响应（无相机，手动喂观测给估计器）
@@ -119,14 +123,15 @@ for step in range(60):
         new_mm = w.state_pos_mm + v * 0.033
         px = w.world_mm_to_px(new_mm)
         w.bead = (px[0], px[1], 300)
-        w.estimate_state(0.033, True)      # 无相机：显式喂入观测
+        w.estimate_state(0.033, True)  # 无相机：显式喂入观测
     time.sleep(0.034)  # 给真实 10Hz worker 留出运行时间。
-    w.tick()          # 完整主循环（视觉占位/控制/渲染/状态栏）
+    w.tick()  # 完整主循环（视觉占位/控制/渲染/状态栏）
 print("模拟 60 帧完成, 追踪中:", w.tracking, " 目标索引:", w.target_idx)
 assert w.exp_log_mpc and len(w.traj_px) == len(w.traj_mm) > 0
 assert all(len(row) == 24 for row in w.exp_log_mpc)
-assert np.allclose(w.last_solver_rec["requested_B_direction"],
-                   m.cfg.CONTROL_FIELD_DIRECTION)
+assert np.allclose(
+    w.last_solver_rec["requested_B_direction"], m.cfg.CONTROL_FIELD_DIRECTION
+)
 assert w.last_solver_rec["solver_mode"] == "field-force-moore-penrose"
 assert w.last_solver_rec["requested_B_magnitude_mT"] == 10.0
 w.emergency_stop()
@@ -171,7 +176,7 @@ print("斜率层步进:", [a - b for a, b in zip(w.last_sent_cmd, prev)])
 
 # 运动控制必须同时满足目标力和 GUI 对齐场矢量，因此自动切到六路自由模式
 w.chk_cur_live.setChecked(False)
-w.combo_constraint.setCurrentIndex(2)     # 三路模式
+w.combo_constraint.setCurrentIndex(2)  # 三路模式
 w.bead = (760, 540, 300)
 w.make_circle(400)
 w.start_tracking()
@@ -234,8 +239,9 @@ for _ in range(12):
 target_A, seq, _, _ = w.shared.get_I_target()
 assert seq > 0 and np.max(np.abs(target_A)) <= m.cfg.MAX_CURRENT_A + 1e-9
 assert w.exp_log_mpc and all(len(row) == 24 for row in w.exp_log_mpc)
-assert np.allclose(w.shared._I_target["rec"]["requested_B_direction"],
-                   m.cfg.CONTROL_FIELD_DIRECTION)
+assert np.allclose(
+    w.shared._I_target["rec"]["requested_B_direction"], m.cfg.CONTROL_FIELD_DIRECTION
+)
 assert w.shared._I_target["rec"]["solver_mode"] == "field-force-moore-penrose"
 assert w.worker.mpc_x.N == 4 and w.worker.mpc_x.wp == 2.5
 assert w.worker.mpc_x.fmax == 25.0
@@ -248,12 +254,18 @@ for _ in range(4):
 assert w.worker.mpc_x.wp == 3.5
 # 正式实验导出仅包含原有 24 列 MPC 数据，保留字段顺序和数据值。
 csv_path = os.path.join(settings_dir.name, "experiment_mpc10hz.csv")
-with patch.object(m.QFileDialog, "getSaveFileName", return_value=(csv_path, "CSV (*.csv)")), \
-        patch.object(m.QMessageBox, "information"):
+with patch.object(
+    m.QFileDialog, "getSaveFileName", return_value=(csv_path, "CSV (*.csv)")
+), patch.object(m.QMessageBox, "information"):
     w.save_traj()
 with open(csv_path, encoding="utf-8", newline="") as f:
     rows = list(csv.reader(f))
-assert len(rows[0]) == 24 and rows[0][:4] == ["timestamp", "mpc_ms", "solver_ms", "mpc_cost"]
+assert len(rows[0]) == 24 and rows[0][:4] == [
+    "timestamp",
+    "mpc_ms",
+    "solver_ms",
+    "mpc_cost",
+]
 assert len(rows) == len(w.exp_log_mpc) + 1
 assert rows[1] == [str(value) for value in w.exp_log_mpc[0]]
 w.emergency_stop()
@@ -265,6 +277,7 @@ w.start_tracking()
 assert w.shared is not first_shared and not w.shared.stopped()
 assert w.worker is not None and w.worker.is_alive()
 w.emergency_stop()
+
 
 # 合成相机验证视觉主循环，不访问真实摄像头。
 class SyntheticCamera:
@@ -291,10 +304,8 @@ w.close_camera()
 
 # 蓝色磁场箭头与红色受力箭头均能绘制
 canvas = np.zeros((160, 240, 3), np.uint8)
-w._draw_vector_arrow(canvas, (120, 80), [0, 0, -10e-3], 10e-3,
-                     (255, 0, 0), "B")
-w._draw_vector_arrow(canvas, (120, 80), [30e-6, 0, 0], 100e-6,
-                     (0, 0, 255), "F")
+w._draw_vector_arrow(canvas, (120, 80), [0, 0, -10e-3], 10e-3, (255, 0, 0), "B")
+w._draw_vector_arrow(canvas, (120, 80), [30e-6, 0, 0], 100e-6, (0, 0, 255), "F")
 assert np.any(canvas[:, :, 0] > 0) and np.any(canvas[:, :, 2] > 0)
 
 # 路径截图和录像保存的都是最终标注画面，而不是无标注的相机原始帧。

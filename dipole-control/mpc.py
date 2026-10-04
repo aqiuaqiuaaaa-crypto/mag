@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 10 Hz 线性 MPC 控制器（输出目标磁力，不直接输出电流）
 ======================================================
@@ -32,9 +31,17 @@ import numpy as np
 class ForceMPC:
     """单轴（x 或 y）线性 MPC；x/y 各建一个实例（模型解耦）。"""
 
-    def __init__(self, dt, horizon=3, c_drag=9.42,
-                 w_pos=1.0, w_vel=2.0, w_u=0.005, fmax=40.0,
-                 w_delta=0.01):
+    def __init__(
+        self,
+        dt,
+        horizon=3,
+        c_drag=9.42,
+        w_pos=1.0,
+        w_vel=2.0,
+        w_u=0.005,
+        fmax=40.0,
+        w_delta=0.01,
+    ):
         self.dt = float(dt)
         self.N = int(horizon)
         self.c = float(c_drag)
@@ -43,12 +50,13 @@ class ForceMPC:
         self.wu = float(w_u)
         self.wd = float(w_delta)
         self.fmax = float(fmax)
-        self.a = self.dt / self.c                 # mm/µN：力→每步位移增益
+        self.a = self.dt / self.c  # mm/µN：力→每步位移增益
 
     @staticmethod
     def _bounded_qp(H, g, limit):
         """求 min x'Hx+2g'x, s.t. |x_i|<=limit；N=3 时仅 27 个活动集。"""
         import itertools
+
         n = len(g)
         best_x, best_obj = None, float("inf")
         tol = 1e-10
@@ -98,14 +106,13 @@ class ForceMPC:
         d = float(d)
         # 参考序列对齐到长度 N（k = 0..N−1 对应施加 F_k 后的时刻 k+1）
         r = self._pad_reference(ref_seq, N)
-        vr = self._pad_reference(v_ref_seq, N) if v_ref_seq is not None \
-            else np.zeros(N)
+        vr = self._pad_reference(v_ref_seq, N) if v_ref_seq is not None else np.zeros(N)
 
         # 预测：x_{k+1} = x0 + a·Σ_{i≤k}(F_i + d)，k = 0..N−1（x_{k+1} 对应 F_0..F_k）
         # 灵敏度矩阵 L[k, i] = a·(i ≤ k)
-        L = a * np.tril(np.ones((N, N)))          # (N,N)
-        k_vec = np.arange(N) + 1.0                # x_{k+1} 的扰动行程 = a·(k+1)·d
-        x_pred_const = x0 + a * k_vec * d         # F=0 时的预测轨迹（含扰动）
+        L = a * np.tril(np.ones((N, N)))  # (N,N)
+        k_vec = np.arange(N) + 1.0  # x_{k+1} 的扰动行程 = a·(k+1)·d
+        x_pred_const = x0 + a * k_vec * d  # F=0 时的预测轨迹（含扰动）
 
         # 代价二次型（变量 F_0..F_{N−1}）：
         #   J = Σ wp·(x0 + a·L F + a·k·d − r)² + Σ wv/c²·(F + d − c·vr)² + Σ wu·F²
@@ -115,26 +122,35 @@ class ForceMPC:
             D[np.arange(1, N), np.arange(N - 1)] = -1.0
         b_delta = np.zeros(N)
         b_delta[0] = float(f_prev)
-        H = (self.wp * (L.T @ L)
-             + np.eye(N) * (self.wu + self.wv / self.c ** 2)
-             + self.wd * (D.T @ D))
+        H = (
+            self.wp * (L.T @ L)
+            + np.eye(N) * (self.wu + self.wv / self.c**2)
+            + self.wd * (D.T @ D)
+        )
         gv = np.zeros(N)
         for k in range(N):
             # 位置项梯度：wp·L_kᵀ·(x0 + a·k·d − r_k)
             gv += self.wp * L[k, :] * (x_pred_const[k] - r[k])
             # 速度项梯度：wv/c²·(F_k + d − c·vr_k) → 线性项 −wv/c²·(c·vr_k − d)
-            gv[k] += -(self.wv / self.c ** 2) * (self.c * vr[k] - d)
+            gv[k] += -(self.wv / self.c**2) * (self.c * vr[k] - d)
         gv -= self.wd * (D.T @ b_delta)
         # 直接求箱约束 QP；不能把耦合的无约束序列逐元素 clip。
         F_seq = self._bounded_qp(H, gv, self.fmax)
 
         x_pred = x_pred_const + L @ F_seq
         v_pred = (F_seq + d) / self.c
-        cost = float(self.wp * np.sum((x_pred - r) ** 2)
-                     + self.wv * np.sum((v_pred - vr) ** 2)
-                     + self.wu * np.sum(F_seq ** 2)
-                     + self.wd * np.sum((D @ F_seq - b_delta) ** 2))
-        return {"F0": float(F_seq[0]), "F_seq": F_seq.copy(),
-                "x_pred": x_pred.copy(), "v_pred": v_pred.copy(),
-                "delta_F": (D @ F_seq - b_delta).copy(),
-                "cost": cost, "fmax": self.fmax}
+        cost = float(
+            self.wp * np.sum((x_pred - r) ** 2)
+            + self.wv * np.sum((v_pred - vr) ** 2)
+            + self.wu * np.sum(F_seq**2)
+            + self.wd * np.sum((D @ F_seq - b_delta) ** 2)
+        )
+        return {
+            "F0": float(F_seq[0]),
+            "F_seq": F_seq.copy(),
+            "x_pred": x_pred.copy(),
+            "v_pred": v_pred.copy(),
+            "delta_F": (D @ F_seq - b_delta).copy(),
+            "cost": cost,
+            "fmax": self.fmax,
+        }

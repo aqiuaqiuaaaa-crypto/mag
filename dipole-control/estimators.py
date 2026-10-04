@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 状态估计与扰动观测模块
 ======================
@@ -24,10 +23,10 @@ class KalmanFilter2D:
     """常速度模型卡尔曼滤波：状态 [x, y, vx, vy]，观测 [x, y]"""
 
     def __init__(self, q_pos=1e-4, q_vel=5e-3, r_meas=0.005):
-        self.q_pos = float(q_pos)       # 过程噪声位置方差 (mm²)
-        self.q_vel = float(q_vel)       # 过程噪声速度方差 (mm²/s²)
-        self.r_meas = float(r_meas)     # 观测噪声方差 (mm²)
-        self.x = np.zeros(4)            # [x, y, vx, vy] (mm, mm/s)
+        self.q_pos = float(q_pos)  # 过程噪声位置方差 (mm²)
+        self.q_vel = float(q_vel)  # 过程噪声速度方差 (mm²/s²)
+        self.r_meas = float(r_meas)  # 观测噪声方差 (mm²)
+        self.x = np.zeros(4)  # [x, y, vx, vy] (mm, mm/s)
         self.P = np.eye(4) * 1.0
         self.initialized = False
 
@@ -45,12 +44,12 @@ class KalmanFilter2D:
                 self.reset(z[0], z[1])
             return self.x[:2].copy(), self.x[2:].copy()
         # 预测
-        F = np.array([[1, 0, dt, 0],
-                      [0, 1, 0, dt],
-                      [0, 0, 1, 0],
-                      [0, 0, 0, 1]], dtype=float)
-        Q = np.diag([self.q_pos * dt, self.q_pos * dt,
-                     self.q_vel * dt, self.q_vel * dt])
+        F = np.array(
+            [[1, 0, dt, 0], [0, 1, 0, dt], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=float
+        )
+        Q = np.diag(
+            [self.q_pos * dt, self.q_pos * dt, self.q_vel * dt, self.q_vel * dt]
+        )
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
         # 更新
@@ -83,14 +82,14 @@ class ESO1D:
         self.b0 = float(b0)
         if beta is None:
             w = float(omega0)
-            self.beta1, self.beta2, self.beta3 = 3.0 * w, 3.0 * w * w, w ** 3
+            self.beta1, self.beta2, self.beta3 = 3.0 * w, 3.0 * w * w, w**3
         else:
             self.beta1, self.beta2, self.beta3 = beta
         self.delta = float(fal_delta)
         self.dist_limit = float(dist_limit)
-        self.z1 = 0.0       # 位置估计
-        self.z2 = 0.0       # 速度估计
-        self.z3 = 0.0       # 扰动力估计（力单位）
+        self.z1 = 0.0  # 位置估计
+        self.z2 = 0.0  # 速度估计
+        self.z3 = 0.0  # 扰动力估计（力单位）
         self.initialized = False
 
     def reset(self, x0=0.0):
@@ -106,8 +105,9 @@ class ESO1D:
             return self.z3
         e1 = self.z1 - float(x_meas)
         self.z1 += dt * (self.z2 - self.beta1 * e1)
-        self.z2 += dt * (self.b0 * (float(u) + self.z3)
-                         - self.beta2 * fal(e1, 0.5, self.delta))
+        self.z2 += dt * (
+            self.b0 * (float(u) + self.z3) - self.beta2 * fal(e1, 0.5, self.delta)
+        )
         self.z3 -= dt * self.beta3 * fal(e1, 0.25, self.delta)
         self.z3 = float(np.clip(self.z3, -self.dist_limit, self.dist_limit))
         return self.z3

@@ -2,7 +2,31 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 最新权威摘要（2026-10-04：上位机类型检查清零，未提交）
+## 最新权威摘要（2026-10-04：中断恢复后 Ruff 清零，独立代码质量 checkpoint）
+
+- 恢复时 HEAD 仍为类型 checkpoint `65fad950a092299af602e69f1e092a32795fb030`；暂存区为空。已有 16 个 tracked 文件的未提交修改和 untracked artifacts 原样保留，并在 `artifacts/code-quality-20261004/ruff-zero/recovered/` 保存恢复快照、完整 diff 与 SHA-256。
+- 重新运行 Ruff 的真实起点为 **24 项**：BLE001 14、S110 3、F821 1、RUF046 4、FURB122 2。中断前已改完 heightForWidth、coil_test_step、矢量箭头两个坐标的 4 处 RUF046；逐处验证等价后保留，没有重复修改；CSV 两处尚未改。
+- 本轮新增 4 处舍入冗余转换清理及 2 处惰性生成器 writelines；全部 8 个舍入诊断及两个 CSV 路径与类型 checkpoint 对照，1,122 组验证 PASS，包含整数类型、协议/限幅、半整数舍入、CSV 字节/顺序、转换/编码异常及部分输出。未使用 unsafe-fixes、noqa、新增 ignore 或修改 Ruff 规则。
+- F821 真 bugfix：bead_sim_gui 导入 os，参数扫描走真实 CSV 和 PNG 导出不再 NameError；保留失败传播及 finally 恢复鼠标。另修复设置文件 JSON 根节点为数组/null 时未被校验的问题，提示并保留默认设置。
+- 异常捕获按串口、模型、文件/编码、OpenCV、CSV、控件转换分别收窄。安全边界保留宽捕获并用 logger.exception 留完整 traceback：TX 失败断开、急停写入失败继续停本地线程、手动力解算失败安全归零、诊断失败显示值归零；closeEvent 的设置序列化 bug 也不能阻断后续急停。串口关闭预期失败显示/记录，finally 始终清理引用；模型/串口连接的真正程序错误在禁用模型或清理连接后重新抛出。
+- 最终 Ruff **0**、Black **PASS / 20 files**、mypy **0 error / 20 files**；GUI smoke PASS；MPC 6/6、multirate 18/18、solver/protocol/safety 25/25、CURT parser/GUI 132/132、shared control 6/6、bead simulator 8/8；新增异常路径/参数扫描 46/46。多速率时序组本轮单独执行一次即通过，沿用历史仅测试子进程的 BLAS/OMP 单线程设置；未改变控制节拍/阈值。新增仿真 GUI 测试有 10 条已有空图例 warning，无失败。
+- 本轮与恢复快照比较，仅新增修改三个生产文件和本记忆，并新增 tests/test_error_paths.py。ForceMPC、SharedState、ControlWorker、CurrentExecutor、DipoleSolver、KalmanFilter2D、ESO1D 类源码保持；send_commands/emergency_stop 正常执行主体及实际发送字节保持。146 个 tracked 固件文件和 4 个 CURT 专属文件逐字节保持；MPC 数学/权重、R-L 模型、10/30 Hz、a0...a5、CURT 控制反馈边界不变。
+- 完整逐项决策、最终 diff/stat/status、全部检查日志与源码保护证据：`artifacts/code-quality-20261004/ruff-zero/final-review.md`、`final-results.json`、`equivalence-results.json`、`protection-results.json`。旧目录中的 28 项报告是历史状态，不代表本轮结果。
+- 用户明确授权将已验证的代码质量清理建立独立 checkpoint：本条所在提交 `refactor: harden Python error handling and lint clean`，共 17 个文件（15 个既有 Python 源码/测试文件、本记忆及新增 tests/test_error_paths.py），父提交为上述类型 checkpoint。提交前核对完整工作区/暂存区 diff 与精确路径，显式 stage；artifacts、日志、CSV、cache 与其他无关文件均未纳入，未 push。早期“未提交/等待审查”保留为历史记录；本轮仅整理提交和更新记忆，功能代码未继续修改。
+- 该 checkpoint 的提交前后 Git 记录与路径验证位于 `artifacts/code-quality-20261004/ruff-zero/checkpoint/`；完成后 tracked 工作区与暂存区无差异，仅 artifacts/ 未跟踪。没有打开真实 COM/相机、操作实机或修改/构建/烧录固件；真实硬件验证、CURT 标定与 PI 状态不变。
+
+## 历史摘要（2026-10-04：类型 checkpoint 完成，Ruff / Black 初轮清理待审查）
+
+- 已按用户授权建立独立类型修复 checkpoint：`65fad950a092299af602e69f1e092a32795fb030`，`chore: clean up Python typing`。仅提交 7 个类型修复/依赖声明/记忆文件；未提交 artifacts，未 push。
+- Ruff 全上位机新基线为 104 项：未用导入/变量 37、导入/顺序/风格 34、简化 9、异常处理 17、潜在 bug 1、其他 6。45 项仅用安全 fix 自动处理；31 项逐项人工确认后处理；保留 28 项。未使用 unsafe-fixes、未新增 noqa 或全局 ignore。
+- 人工修改仅为 21 个未读取绑定重命名（所有计算、解包和分配保留）、4 个共享列表 ClassVar 注解、5 处有意字符串拼接的括号、1 处同顺序短路条件合并。保留 BLE001 14、S110 3、RUF046 8、FURB122 2、F821 1；未改变故障回退、整数转换、CSV write 调用顺序，未修复仿真 GUI 参数扫描原有的 os 未定义错误路径。
+- Black 仅格式化当时 check 指出的 15 个文件；全上位机最终 black --check 为 PASS（19 文件），mypy 为 0 error（19 文件）。requirements-dev.txt、运行依赖及 pyserial 版本本轮均未改。
+- Ruff 后、Black 后均执行 GUI smoke、MPC 6、multirate 18、solver/protocol/safety 25、CURT parser/GUI 132、shared control 6、bead simulator 基础 8，最终均通过。Black 后 multirate 并行首轮有一次最大帧间隔 119.6 ms 的耗时断言失败；其他检查结束后单独重跑 18/18 通过，原失败与重跑日志均保留；未调整 60 ms 阈值或控制节拍。
+- 源码保护审查通过：19 个上位机 Python 文件在明确允许的导入清理、未读绑定名、ClassVar、等价短路条件和 docstring 缩进规范化后，可执行 AST 与类型 checkpoint 等价；send_commands() AST 完全一致。STM32 固件、CURT parser/CSV/parser tests/GUI telemetry tests 均逐字节保持；MPC 数学、Kalman/ESO、R-L、电流执行及仿真物理表达式保持。
+- 完整逐项 Ruff 决策与全部日志：`artifacts/code-quality-20261004/ruff-item-review.md`、`ruff-stage-results.json`、`black-stage-results.json`、`black-stage-protection.json`。日志/缓存/CSV 均在未跟踪 artifacts 内，不提交。
+- 本轮代码质量修改 **尚未提交**，等待用户审查；HEAD 保持上述类型 checkpoint。未 push，未操作真实串口、相机或硬件；CURT 电流标定和 PI 状态不变。
+
+## 历史摘要（2026-10-04：上位机类型检查清零；当时未提交，现已 checkpoint）
 
 - 本轮仅修复类型信息：原 7 个代码诊断与 2 个 pyserial 类型桩缺失诊断均已解决。全上位机 mypy 默认参数及 `--follow-imports=silent` 均为 19 source files / 0 error；没有全局 ignore_missing_imports 或新增 type: ignore。
 - 四处空列表注解与两个可选模块注解；原失败计数表达式、全部既有函数/类定义和控制行为保持。安装 `types-pyserial==3.5.0.20260712`，pyserial 仍为 3.5；新增 requirements-dev.txt，运行 requirements.txt 不变。

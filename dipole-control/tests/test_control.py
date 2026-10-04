@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 共享控制模块单元测试（摩擦/减摩/阻力/ESO/Kalman/方向）
 ==================================================
 独立运行：py tests/test_control.py（也兼容 pytest）
 """
+
 import math
 import os
 import sys
@@ -13,9 +13,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config as cfg
-from dipole_solver import DipoleSolver
-from estimators import KalmanFilter2D, ESO1D
 import friction_model as fm
+from dipole_solver import DipoleSolver
+from estimators import ESO1D, KalmanFilter2D
 
 RESULTS: list[tuple[str, bool, str]] = []
 
@@ -32,6 +32,7 @@ def test(fn):
         except Exception as e:  # noqa
             RESULTS.append((fn.__name__, False, f"{type(e).__name__}: {e}"))
             print(f"  ERROR {fn.__name__}: {type(e).__name__}: {e}")
+
     wrapper.__name__ = fn.__name__
     return wrapper
 
@@ -46,7 +47,7 @@ def test_friction_model():
     # N = max(N_min, W_eff − Fz)
     assert abs(fm.normal_force_uN(W, 0, 2) - W) < 1e-9
     assert abs(fm.normal_force_uN(W, 0.6 * W, 2) - 0.4 * W) < 1e-9
-    assert fm.normal_force_uN(W, 10 * W, 2) == 2.0        # N_min 下限
+    assert fm.normal_force_uN(W, 10 * W, 2) == 2.0  # N_min 下限
     # 有效重量量级：6500 kg/m³ × 5.24e-10 m³ × 9.81 ≈ 33.4 µN
     assert 30.0 < W < 37.0, f"W_eff={W}"
 
@@ -65,8 +66,10 @@ def test_lift_effect():
     # 不做完全悬浮：ratio<1 时 Fz_lift < W_eff
     assert fz < W
     # 静→动平滑过渡（无跳变）
-    mus = [fm.mu_effective(v, 0.25, 0.15, cfg.FRICTION_V_EPS)
-           for v in np.linspace(0, 1.0, 50)]
+    mus = [
+        fm.mu_effective(v, 0.25, 0.15, cfg.FRICTION_V_EPS)
+        for v in np.linspace(0, 1.0, 50)
+    ]
     assert all(mus[i] >= mus[i + 1] - 1e-12 for i in range(len(mus) - 1))
 
 
@@ -83,14 +86,18 @@ def test_eso():
     # 已知人工扰动 d=20µN：闭环中 z3 应跟踪，且补偿后速度收敛到期望值
     c = S.drag_uN_per_mm_s(1000.0)
     for w0 in (3.0, 4.0, 6.0):
-        eso = ESO1D(b0=1.0 / c, omega0=w0, fal_delta=cfg.ESO_FAL_DELTA,
-                    dist_limit=cfg.ESO_DIST_LIMIT_UN)
+        eso = ESO1D(
+            b0=1.0 / c,
+            omega0=w0,
+            fal_delta=cfg.ESO_FAL_DELTA,
+            dist_limit=cfg.ESO_DIST_LIMIT_UN,
+        )
         x = v = 0.0
-        d = 10.0                     # 未建模恒定扰动（力，限幅 12µN 内）
+        d = 10.0  # 未建模恒定扰动（力，限幅 12µN 内）
         v_des = 1.0
         z3s = []
         # 简单位置闭环：u = c·v_des + Kp·(x_des−x) − z3
-        Kp = 50.0                    # µN/mm
+        Kp = 50.0  # µN/mm
         x_des = 0.0
         for k in range(3000):
             u = c * v_des + Kp * (x_des - x) - eso.z3
@@ -112,15 +119,16 @@ def test_kalman():
     diff_v, kal_v = [], []
     for k in range(300):
         pos += truth_v * dt
-        z = pos + rng.normal(0, 0.05)      # 0.05mm 视觉噪声
+        z = pos + rng.normal(0, 0.05)  # 0.05mm 视觉噪声
         if z_prev is not None and k > 20:
             diff_v.append((z - z_prev) / dt)
         z_prev = z
         p, v = kf.step(dt, (z, 0.0))
         if k > 50:
             kal_v.append(v[0])
-    assert np.std(kal_v) < np.std(diff_v), \
-        f"Kalman std={np.std(kal_v):.4f} 应小于差分 std={np.std(diff_v):.4f}"
+    assert np.std(kal_v) < np.std(
+        diff_v
+    ), f"Kalman std={np.std(kal_v):.4f} 应小于差分 std={np.std(diff_v):.4f}"
     # 丢失观测时仅预测不发散
     p, v = kf.step(dt, None)
     assert np.all(np.isfinite(p)) and np.all(np.isfinite(v))
@@ -129,14 +137,20 @@ def test_kalman():
 @test
 def test_force_direction():
     # Solver 对 ±X/±Y 期望力生成对应方向（力与期望方向夹角 < 45°）
-    for F_des in [np.array([4e-6, 0, 0]), np.array([-4e-6, 0, 0]),
-                  np.array([0, 4e-6, 0]), np.array([0, -4e-6, 0])]:
+    for F_des in [
+        np.array([4e-6, 0, 0]),
+        np.array([-4e-6, 0, 0]),
+        np.array([0, 4e-6, 0]),
+        np.array([0, -4e-6, 0]),
+    ]:
         rec = S.solve_commands(np.zeros(3), F_des, cmd_prev=0)
         F_act = rec["achieved_force"]
         cosang = np.dot(F_act[:2], F_des[:2]) / (
-            np.linalg.norm(F_act[:2]) * np.linalg.norm(F_des[:2]) + 1e-30)
-        assert cosang > 0.7, \
-            f"F_des={F_des[:2]}: 方向偏差过大 cos={cosang:.2f}, F_act={F_act}"
+            np.linalg.norm(F_act[:2]) * np.linalg.norm(F_des[:2]) + 1e-30
+        )
+        assert (
+            cosang > 0.7
+        ), f"F_des={F_des[:2]}: 方向偏差过大 cos={cosang:.2f}, F_act={F_act}"
         # F_actual 与最终发送电流一致
         F_ref = S.force_at(np.zeros(3), rec["currents"])
         assert np.linalg.norm(F_act - F_ref) < 1e-15
@@ -146,8 +160,14 @@ if __name__ == "__main__":
     print("=" * 64)
     print("控制模块单元测试")
     print("=" * 64)
-    for fn in [test_friction_model, test_lift_effect, test_drag,
-               test_eso, test_kalman, test_force_direction]:
+    for fn in [
+        test_friction_model,
+        test_lift_effect,
+        test_drag,
+        test_eso,
+        test_kalman,
+        test_force_direction,
+    ]:
         fn()
     n_fail = sum(not ok for _, ok, _ in RESULTS)
     print("-" * 64)

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 底面接触摩擦 / 法向力模型（贴底磁珠减摩控制）
 ==============================================
@@ -23,7 +22,7 @@ import numpy as np
 
 def effective_weight_uN(rho_bead, rho_fluid, radius_m, g=9.81):
     """有效重力（扣除浮力），单位 µN"""
-    v = 4.0 / 3.0 * math.pi * radius_m ** 3
+    v = 4.0 / 3.0 * math.pi * radius_m**3
     return (rho_bead - rho_fluid) * v * g * 1e6
 
 
@@ -43,8 +42,9 @@ def lift_force_uN(w_eff, normal_ratio, fz_max, n_min):
 def mu_effective(v, mu_static, mu_dynamic, v_eps):
     """静→动摩擦系数平滑过渡：μ_eff(v) = μ_d + (μ_s−μ_d)·exp(−(|v|/v_eps)²)"""
     v = float(v)
-    return float(mu_dynamic) + (float(mu_static) - float(mu_dynamic)) \
-        * math.exp(-(v / float(v_eps)) ** 2)
+    return float(mu_dynamic) + (float(mu_static) - float(mu_dynamic)) * math.exp(
+        -((v / float(v_eps)) ** 2)
+    )
 
 
 def friction_comp_uN(v_des_x, v_des_y, normal_force, mu_static, mu_dynamic, v_eps):
@@ -53,9 +53,18 @@ def friction_comp_uN(v_des_x, v_des_y, normal_force, mu_static, mu_dynamic, v_ep
     返回 (fx_comp, fy_comp, mu_eff)。"""
     if normal_force <= 0:
         return 0.0, 0.0, float(mu_dynamic)
-    fx = mu_effective(v_des_x, mu_static, mu_dynamic, v_eps) * normal_force \
+    fx = (
+        mu_effective(v_des_x, mu_static, mu_dynamic, v_eps)
+        * normal_force
         * math.tanh(v_des_x / float(v_eps))
-    fy = mu_effective(v_des_y, mu_static, mu_dynamic, v_eps) * normal_force \
+    )
+    fy = (
+        mu_effective(v_des_y, mu_static, mu_dynamic, v_eps)
+        * normal_force
         * math.tanh(v_des_y / float(v_eps))
-    return float(fx), float(fy), mu_effective(
-        math.hypot(v_des_x, v_des_y), mu_static, mu_dynamic, v_eps)
+    )
+    return (
+        float(fx),
+        float(fy),
+        mu_effective(math.hypot(v_des_x, v_des_y), mu_static, mu_dynamic, v_eps),
+    )
