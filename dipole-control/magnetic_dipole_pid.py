@@ -18,6 +18,8 @@ import os
 import json
 import math
 import time
+from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import cv2
@@ -44,9 +46,16 @@ from dipole_solver import DipoleSolver, ModelValidationError
 from multirate import SharedState, ControlWorker, CurrentExecutor
 from estimators import KalmanFilter2D, ESO1D
 import friction_model as fm
+from adc_csv import ADCLogger
+from curt_telemetry import ADCSnapshot, ADCStreamDecoder
 
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "gui_settings.json")
+
+ADC_RX_INTERVAL_MS = 15
+ADC_RX_MAX_BYTES = 1024
+ADC_STALE_S = 0.5
+ADC_POLES = (1, 3, 5, 4, 6, 2)
 
 # 历史公共 CSV 表头保留作为旧数据格式说明；主 GUI 仅导出 MPC 日志。
 CSV_HEADER = [
@@ -201,6 +210,9 @@ class VideoLabel(QLabel):
 
 
 class MagneticDipoleControl(QMainWindow):
+    adc_snapshot: ADCSnapshot | None
+    adc_received_at: float | None
+    adc_logger: ADCLogger | None
     spin_mpc_w_pos: QDoubleSpinBox
     spin_mpc_w_vel: QDoubleSpinBox
     spin_mpc_w_u: QDoubleSpinBox
@@ -304,6 +316,22 @@ class MagneticDipoleControl(QMainWindow):
 
         # ---------- 串口 / 模型 ----------
         self.ser = None
+        self.adc_decoder = ADCStreamDecoder()
+        self.adc_snapshot = None
+        self.adc_received_at = None
+        self.adc_receive_time = ""
+        self.adc_rx_bytes = 0
+        self.adc_rx_frames = 0
+        self.adc_rx_errors = 0
+        self.adc_parser_errors = 0
+        self.adc_monitor_error = ""
+        self.adc_logger = None
+        self.adc_rx_timer = QTimer(self)
+        self.adc_rx_timer.setInterval(ADC_RX_INTERVAL_MS)
+        self.adc_rx_timer.timeout.connect(self.poll_serial_rx)
+        self.adc_status_timer = QTimer(self)
+        self.adc_status_timer.setInterval(100)
+        self.adc_status_timer.timeout.connect(self._refresh_adc_display)
         self.solver = None
         self.model_ok = False
         self.model_err = ""
@@ -321,6 +349,7 @@ class MagneticDipoleControl(QMainWindow):
         self.timer = QTimer()
         self.timer.timeout.connect(self.tick)
         self.timer.start(cfg.TICK_MS)
+        self.adc_status_timer.start()
 
     # ================= 解算器加载（严格校验，无静默降级） =================
     def _reload_solver(self):
@@ -395,6 +424,7 @@ class MagneticDipoleControl(QMainWindow):
         self.tabs.addTab(self._tab_advanced(), "高级控制")
         self.tabs.addTab(self._tab_diag(), "诊断")
         self.tabs.addTab(self._tab_physics(), "物理参数")
+        self.tabs.addTab(self._tab_adc(), "CURT / ADC")
         self.tabs.setMinimumWidth(400)
         self.control_scroll = QScrollArea()
         self.control_scroll.setWidgetResizable(True)
@@ -1471,6 +1501,261 @@ class MagneticDipoleControl(QMainWindow):
                 f"● 正在录制：{os.path.basename(self.record_path)} | "
                 f"{elapsed:.1f} 秒 / {self.record_frame_count} 帧")
 
+    # ================= CURT 只读监视（不进入控制状态或反馈） =================
+    def _tab_adc(self) -> QWidget:
+        """Build raw ADC and health displays in unchanged logical channel order."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        note = QLabel(
+            "CURT 仅用于观察和记录。ADC raw 尚未标定为 Ampere，"
+            "不参与 MPC/PWM 反馈。\ncommand 是当前 GUI 指令；"
+            "30 Hz 指令与约 10 Hz ADC 快照并不严格同步。"
+        )
+        note.setWordWrap(True)
+        layout.addWidget(note)
+        self.lbl_adc_health = QLabel("DISCONNECTED")
+        layout.addWidget(self.lbl_adc_health)
+        self.tbl_adc = QTableWidget(6, 3)
+        self.tbl_adc.setHorizontalHeaderLabels(
+            ["逻辑通道 / 物理极", "command", "ADC raw（未标定）"]
+        )
+        self.tbl_adc.horizontalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.Stretch
+        )
+        self.tbl_adc.verticalHeader().setVisible(False)
+        self.tbl_adc.setFixedHeight(210)
+        self.adc_command_cells: list[QTableWidgetItem] = []
+        self.adc_raw_cells: list[QTableWidgetItem] = []
+        for index, pole in enumerate(ADC_POLES):
+            cells = [
+                QTableWidgetItem(f"a{index} / Pole{pole}"),
+                QTableWidgetItem("+00"),
+                QTableWidgetItem("—"),
+            ]
+            for column, cell in enumerate(cells):
+                cell.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+                self.tbl_adc.setItem(index, column, cell)
+            self.adc_command_cells.append(cells[1])
+            self.adc_raw_cells.append(cells[2])
+        layout.addWidget(self.tbl_adc)
+        info = QGridLayout()
+        self.adc_info_labels: dict[str, QLabel] = {}
+        fields = (
+            ("frame_count", "frame_count"),
+            ("timestamp_mcu", "MCU timestamp_ms"),
+            ("receive_time", "PC receive time（UTC）"),
+            ("age", "data age"),
+            ("valid", "valid"),
+            ("running", "running"),
+            ("error_flags", "error_flags"),
+            ("overrun_count", "overrun_count"),
+            ("dma_error_count", "dma_error_count"),
+            ("dma_late_count", "dma_late_count"),
+            ("received", "本连接已收 ADC 帧 / 字节"),
+            ("rejected", "拒绝的 ADC 帧"),
+            ("rx_errors", "RX / parser 异常次数"),
+        )
+        for row, (key, title) in enumerate(fields):
+            info.addWidget(QLabel(title), row, 0)
+            label = QLabel("—")
+            label.setWordWrap(True)
+            info.addWidget(label, row, 1)
+            self.adc_info_labels[key] = label
+        layout.addLayout(info)
+        self.lbl_adc_error = QLabel("")
+        self.lbl_adc_error.setWordWrap(True)
+        layout.addWidget(self.lbl_adc_error)
+        self.edit_adc_csv = QLineEdit()
+        self.edit_adc_csv.setReadOnly(True)
+        self.edit_adc_csv.setPlaceholderText("选择新的 ADC CSV 文件")
+        layout.addWidget(self.edit_adc_csv)
+        buttons = QHBoxLayout()
+        self.btn_adc_path = QPushButton("选择 CSV 路径")
+        self.btn_adc_path.clicked.connect(self.choose_adc_csv)
+        self.btn_adc_log_start = QPushButton("开始 ADC 记录")
+        self.btn_adc_log_start.clicked.connect(self.start_adc_logging)
+        self.btn_adc_log_stop = QPushButton("停止 ADC 记录")
+        self.btn_adc_log_stop.clicked.connect(self.stop_adc_logging)
+        buttons.addWidget(self.btn_adc_path)
+        buttons.addWidget(self.btn_adc_log_start)
+        buttons.addWidget(self.btn_adc_log_stop)
+        layout.addLayout(buttons)
+        self.lbl_adc_logging = QLabel("ADC CSV 未记录")
+        self.lbl_adc_logging.setWordWrap(True)
+        layout.addWidget(self.lbl_adc_logging)
+        layout.addStretch(1)
+        self._refresh_adc_display()
+        return page
+
+    def _reset_adc_session(self) -> None:
+        """Discard previous connection fragments, snapshots and monitor counters."""
+        self.adc_decoder = ADCStreamDecoder()
+        self.adc_snapshot = None
+        self.adc_received_at = None
+        self.adc_receive_time = ""
+        self.adc_rx_bytes = self.adc_rx_frames = 0
+        self.adc_rx_errors = self.adc_parser_errors = 0
+        self.adc_monitor_error = ""
+
+    def _stop_adc_rx(self) -> None:
+        """Stop receiving and finish this connection's independent ADC CSV."""
+        self.adc_rx_timer.stop()
+        self.stop_adc_logging()
+        self.adc_decoder.buffer.clear()
+        self.adc_snapshot = None
+        self.adc_received_at = None
+        self.adc_receive_time = ""
+        self._refresh_adc_display()
+
+    def poll_serial_rx(self) -> None:
+        """Read only available bytes from the GUI-owned, nonblocking serial port."""
+        port = self.ser
+        if port is None:
+            self._stop_adc_rx()
+            return
+        try:
+            waiting = port.in_waiting
+            if waiting <= 0:
+                return
+            chunk = port.read(min(waiting, ADC_RX_MAX_BYTES))
+        except Exception as error:  # noqa: BLE001 - isolate monitor faults from control
+            self.adc_rx_errors += 1
+            self.adc_monitor_error = f"RX: {error}"
+            self._refresh_adc_display()
+            return
+        self.adc_rx_bytes += len(chunk)
+        try:
+            snapshots = self.adc_decoder.feed(chunk)
+        except Exception as error:  # noqa: BLE001 - isolate decoder faults from control
+            self.adc_parser_errors += 1
+            self.adc_monitor_error = f"ADC parser: {error}"
+            self.adc_decoder.buffer.clear()
+            self._refresh_adc_display()
+            return
+        self.adc_monitor_error = ""
+        for snapshot in snapshots:
+            timestamp_pc = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            self.adc_snapshot = snapshot
+            self.adc_received_at = time.monotonic()
+            self.adc_receive_time = timestamp_pc
+            self.adc_rx_frames += 1
+            if self.adc_logger is not None:
+                self.adc_logger.enqueue(snapshot, timestamp_pc)
+        self._refresh_adc_display()
+
+    def adc_health(self, now: float | None = None) -> str:
+        """Describe observation freshness and validity without changing control."""
+        if self.ser is None or not self.adc_rx_timer.isActive():
+            return "DISCONNECTED"
+        if self.adc_monitor_error:
+            return "INVALID"
+        if self.adc_snapshot is None or self.adc_received_at is None:
+            return "STALE"
+        now = time.monotonic() if now is None else now
+        if max(0.0, now - self.adc_received_at) > ADC_STALE_S:
+            return "STALE"
+        snapshot = self.adc_snapshot
+        if not snapshot.valid or not snapshot.running or snapshot.error_flags:
+            return "INVALID"
+        return "LIVE"
+
+    def _refresh_adc_display(self) -> None:
+        """Refresh health, current command and logging progress independently."""
+        health = self.adc_health()
+        colors = {
+            "LIVE": "#2e7d32",
+            "STALE": "#b26a00",
+            "INVALID": "#c62828",
+            "DISCONNECTED": "#666666",
+        }
+        self.lbl_adc_health.setText(health)
+        self.lbl_adc_health.setStyleSheet(
+            f"font-weight: bold; color: {colors[health]};"
+        )
+        snapshot = self.adc_snapshot
+        for index in range(6):
+            self.adc_command_cells[index].setText(f"{self.last_sent_cmd[index]:+03d}")
+            self.adc_raw_cells[index].setText(
+                str(snapshot.raw[index]) if snapshot is not None else "—"
+            )
+        for key in (
+            "frame_count",
+            "timestamp_mcu",
+            "valid",
+            "running",
+            "overrun_count",
+            "dma_error_count",
+            "dma_late_count",
+        ):
+            self.adc_info_labels[key].setText(
+                str(getattr(snapshot, key)) if snapshot is not None else "—"
+            )
+        self.adc_info_labels["error_flags"].setText(
+            f"0x{snapshot.error_flags:08X}" if snapshot is not None else "—"
+        )
+        self.adc_info_labels["receive_time"].setText(self.adc_receive_time or "—")
+        age = (
+            max(0.0, time.monotonic() - self.adc_received_at)
+            if self.adc_received_at is not None
+            else None
+        )
+        self.adc_info_labels["age"].setText(
+            f"{age * 1000:.0f} ms" if age is not None else "—"
+        )
+        self.adc_info_labels["received"].setText(
+            f"{self.adc_rx_frames} / {self.adc_rx_bytes}"
+        )
+        self.adc_info_labels["rejected"].setText(str(self.adc_decoder.rejected))
+        self.adc_info_labels["rx_errors"].setText(
+            f"{self.adc_rx_errors} / {self.adc_parser_errors}"
+        )
+        self.lbl_adc_error.setText(self.adc_monitor_error)
+        logger = self.adc_logger
+        busy = logger is not None and not logger.finished.is_set()
+        self.btn_adc_path.setEnabled(not busy)
+        self.btn_adc_log_start.setEnabled(not busy and self.adc_rx_timer.isActive())
+        self.btn_adc_log_stop.setEnabled(busy)
+        if logger is not None:
+            if logger.error:
+                state = logger.error
+            elif logger.finished.is_set():
+                state = "ADC CSV 已保存"
+            elif logger.opened.is_set():
+                state = "ADC CSV 记录中 / 正在完成已接收记录"
+            else:
+                state = "ADC CSV 正在打开"
+            self.lbl_adc_logging.setText(
+                f"{state}：{logger.path}（已写入 {logger.rows_written} 帧）"
+            )
+
+    def choose_adc_csv(self) -> None:
+        """Choose a new standalone ADC CSV; keep MPC experiment export separate."""
+        name = datetime.now(timezone.utc).strftime("curt_adc_%Y%m%d_%H%M%S.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "选择 ADC CSV（不覆盖已有文件）", name, "CSV (*.csv)"
+        )
+        if path:
+            self.edit_adc_csv.setText(path)
+
+    def start_adc_logging(self) -> None:
+        """Start asynchronous recording of future complete telemetry snapshots."""
+        if not self.adc_rx_timer.isActive() or self.ser is None:
+            return
+        if self.adc_logger is not None and not self.adc_logger.finished.is_set():
+            return
+        if not self.edit_adc_csv.text():
+            self.choose_adc_csv()
+        if not self.edit_adc_csv.text():
+            return
+        self.adc_logger = ADCLogger(Path(self.edit_adc_csv.text()))
+        self._refresh_adc_display()
+
+    def stop_adc_logging(self) -> None:
+        """Request asynchronous drain/close; telemetry observation keeps running."""
+        if self.adc_logger is not None:
+            self.adc_logger.request_stop()
+        self._refresh_adc_display()
+
     # ================= 串口 =================
     def refresh_ports(self):
         self.combo_port.clear()
@@ -1480,6 +1765,7 @@ class MagneticDipoleControl(QMainWindow):
 
     def toggle_serial(self):
         if self.ser:
+            self._stop_adc_rx()
             # 断开前先发硬急停帧，避免 MCU 保持最后一条非零指令。
             self.emergency_stop()
             self.ser.close()
@@ -1495,13 +1781,23 @@ class MagneticDipoleControl(QMainWindow):
             QMessageBox.warning(self, "串口", "没有可用串口")
             return
         try:
-            self.ser = _serial.Serial(port, cfg.BAUDRATE, timeout=0.1)
+            self.ser = _serial.Serial(port, cfg.BAUDRATE, timeout=0)
             # 新连接从已知的零输出状态开始，不能沿用上次会话的斜率历史。
             self.ser.write(b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n")
             self.last_sent_cmd = [0] * 6
             self.btn_serial.setText("断开")
             self.lbl_serial.setText(f"已连接 {port}")
+            self._reset_adc_session()
+            self.adc_rx_timer.start()
+            self._refresh_adc_display()
         except Exception as e:
+            self._stop_adc_rx()
+            if self.ser:
+                try:
+                    self.ser.close()
+                except (OSError, ValueError) as close_error:
+                    self.adc_monitor_error = f"串口关闭: {close_error}"
+                self.ser = None
             QMessageBox.warning(self, "串口", f"打开失败: {e}")
 
     def send_commands(self, cmd_list):
@@ -2494,6 +2790,9 @@ class MagneticDipoleControl(QMainWindow):
 
     # ================= 退出清理 =================
     def closeEvent(self, e):
+        self._stop_adc_rx()
+        self.adc_status_timer.stop()
+        self.timer.stop()
         self.save_settings()
         self.tracking = False
         self.stopping = False
@@ -2502,6 +2801,8 @@ class MagneticDipoleControl(QMainWindow):
         self.close_camera()
         if self.ser:
             self.ser.close()
+        if self.adc_logger is not None:
+            self.adc_logger.wait_closed()
         super().closeEvent(e)
 if __name__ == "__main__":
     app = QApplication(sys.argv)

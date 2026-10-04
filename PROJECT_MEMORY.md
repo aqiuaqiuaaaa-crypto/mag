@@ -2,6 +2,22 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-04：CURT 已集成 MPC-only 主 GUI）
+
+- 正式实机自动轨迹控制仍为 **MPC-only**；RL / ES-MLP 已删除；独立仿真器及其 PID 保留。
+- 用户明确授权的 Phase A checkpoint 已提交：`10f6c164608aa8af83872cbe3420666e3ef79879`，`refactor: keep mpc-only control and remove rl stack`。只含已完成的 MPC-only / RL 清理 13 个路径，未 push；固件、独立 telemetry 源码与 artifacts 未纳入。
+- **CURT telemetry 已完成主 GUI 软件集成和验证**：同一个 `MagneticDipoleControl.self.ser` 负责原有 TX 与唯一 RX reader；独立 15 ms RX QTimer + 现有 ADCStreamDecoder，新增“CURT / ADC”Tab。
+- `@ADC` 只用于 ADC raw 显示、健康监测与独立 CSV 记录；raw 尚未标定为 Ampere，CURT 未进入 MPC/PWM 控制反馈，电流 PI 尚未实现。
+- MPC 核心、Kalman/ESO、Fz 减摩、R-L 电流模型、六路逆解、signed 协议、a0...a5 顺序及 ADC 500 Hz / telemetry 约 10 Hz 设计均保持。原有 send_commands() 和其他控制函数源码不变。
+- 软件回归通过：GUI 集成 27 项、原 CURT 105 项、GUI smoke、shared control 6/6、multirate 18/18、solver/protocol/safety 25/25、MPC 专项 6 项；兼容适配器下全 pytest 208 passed / 288 subtests passed。原生 pytest 仍有 4 个既有装饰器收集错误，静态检查既有问题另见文末。
+- 本轮未打开真实 COM、未运行真实硬件 MPC、未发送硬件命令、未烧录或实测。主 GUI telemetry 实板验证仍待烧录新 HEX 后由用户执行；电流标定与 PI 仍属后续阶段。
+- **CURT 两个 Git checkpoint 已获用户明确授权**：底层 telemetry 已提交 `7e624ccfc9e1e54b3b2feb9a317d36213e2c25b2`（`feat: add CURT telemetry pipeline`）；主 GUI 集成由本条记录所在提交（`feat: integrate CURT telemetry into MPC GUI`）固化。旧“不自动提交”边界对后续工作继续有效；本轮不 push。
+
+完整架构、生命周期、测试、Git 边界与实板操作步骤见文末“CURT 主 GUI 集成完成（2026-10-04，Phase A / B）”。
+
+> 下方早期“CURT 为独立工具、尚未集成主 GUI”和旧下一步计划保留为 historical / superseded；软件当前状态以本摘要及文末最新阶段为准。硬件烧录/测量事实没有由软件测试代替。
+
+
 ## 最新权威摘要（2026-10-04：MPC-only 与 RL 清理）
 
 - 最后更新：2026-10-04。正式实机自动轨迹控制已收敛为 **MPC-only**；原 PD/PID 实机分支属于 historical / superseded，入口仍为 `dipole-control/magnetic_dipole_pid.py`。
@@ -570,3 +586,84 @@ Camera → Vision → Kalman / ESO → Path Reference → SharedState
 既有 pytest 收集、类型和格式问题没有为本轮“全绿”而扩大修改。以上均为软件/模拟端口验证，不代表真实硬件控制或 telemetry 实测完成。
 
 完整依赖扫描、逐行残留分类、Git 状态、测试日志和保护证明位于 `artifacts/rl-cleanup-20261004/`；此前 `artifacts/mpc-only-20261004/` 保留为历史阶段记录。下一步可单独规划主 GUI 的 CURT 监视集成，或另开维护阶段处理旧测试/静态检查；本轮没有实施这些后续工作。
+
+
+# CURT 主 GUI 集成完成（2026-10-04，Phase A / B）
+
+## Phase A：已授权 checkpoint
+
+重新记录 git status、diff/stat、cached diff、log、HEAD、worktree；改前 HEAD 为 `f178822199efe485e845018ecaa62a946e46fee3`，暂存区为空。显式 stage 7 个已修改文件（PROJECT_MEMORY、README、config、gui_settings、主 GUI、smoke_test、test_control）和 6 个 RL tracked deletion，不使用 git add . / 未核对的 add -A。
+
+核对完整 cached diff 后，按用户明确授权创建一次 commit：`10f6c164608aa8af83872cbe3420666e3ef79879`，消息 `refactor: keep mpc-only control and remove rl stack`，13 文件、563 insertions / 2032 deletions，未 push。确认提交路径精确匹配允许清单后才开始 Phase B。
+
+checkpoint 后仍有 5 个此前固件修改（main.c、uvoptx、uvprojx、固件 tests README、test_adc_infrastructure），以及既有 untracked 的独立 curt_telemetry.py/测试、UART telemetry 固件资产和 artifacts。这些均不属于此次 checkpoint 边界，原样保留。PROJECT_MEMORY 里的早期 telemetry 记录仅为历史进度，不表示这些源码已纳入 checkpoint。
+
+## Phase B：软件架构与文件边界
+
+- `dipole-control/magnetic_dipole_pid.py`：新增 ADC monitor 状态、两个 Qt timer、“CURT / ADC”Tab、RX/健康/CSV 槽函数；局部扩展初始化、UI、toggle_serial 和 closeEvent。
+- 新增 `dipole-control/adc_csv.py`：ADCLogger，仅把不可变 CSV 行交给有界队列和独立磁盘线程；不访问串口、Qt 或控制状态。
+- 新增 `dipole-control/tests/test_gui_curt_telemetry.py`：27 项集成/故障隔离/生命周期/CSV 测试。
+- README 增加 GUI 使用与健康/CSV说明，独立 CLI 保留；本记忆只新增最新摘要和阶段，旧文字完整保留。
+- curt_telemetry.py 及原 105 项测试字节不变，CLI 行为不变；requirements/config/gui_settings、仿真器及所有固件文件没有因 Phase B 改动。
+
+```text
+Camera → Vision → Kalman / ESO → Path Reference → SharedState
+  → ControlWorker / ForceMPC（约 10 Hz）→ DipoleSolver
+  → CurrentExecutor（约 30 Hz）→ send_commands() → self.ser TX → STM32
+STM32 ADC/current_sense → @ADC → 同一个 self.ser RX
+  → ADCStreamDecoder / ADCSnapshot → CURT Tab / health
+  → bounded ADC CSV queue → disk writer
+```
+
+主 GUI 只保留原有一次 Serial 构造与一个 RX reader。RX 的 15 ms QTimer 属于 GUI 主线程，不依赖相机、tracking 或 Tab；检查 in_waiting，只读当前可用数据，每次最多 1024 bytes，timeout 从 0.1 改为 0（仅接收等待语义改变，发送函数不变）。不用 readline，不在 control_step/mpc_track_step/ControlWorker 中读取串口，不调用独立 CLI main()。
+
+复用既有 ADCStreamDecoder/ADCSnapshot 及 CSV_HEADER/csv_row，无第二套 parser；拆包、粘包、未知前缀、旧 12-byte echo、损坏帧及重同步均验证。RX/decoder 异常显示错误与计数，不能改变控制状态或发送。原 TX 错误处理仍按原函数关闭串口并置 None，下一次 RX tick 停止 reader；未修改 send_commands()。
+
+连接成功后清空上一会话 decoder/快照/计数并启动 RX；断开先停止 RX/ADC 记录、清半帧和旧快照，再按原流程急停并关闭串口。普通停止/急停保持观察，重连不自动续记旧 CSV。closeEvent 停止接收/显示/控制定时器，执行原有急停和资源释放，之后才进行最多 1 秒的 CSV 退出等待，不让写盘延迟急停；存储设备挂起时不保证已完成全部保存。
+
+## Tab、健康和 CSV
+
+六路顺序固定 `[a0,a1,a2,a3,a4,a5]`；UI 额外标记 Pole `[1,3,5,4,6,2]`，每路显示当前 GUI command 和 **ADC raw（未标定）**，不按物理极号重排，不显示为真实 Ampere。command 与 MCU ADC 快照不严格同步，I_target/I_est 没有混入 raw。
+
+显示 frame_count、MCU timestamp_ms、UTC PC receive time、基于 monotonic 的 data age、valid/running、十六进制 error_flags、overrun/dma_error/dma_late_count，附接收帧/字节、拒绝帧和 RX/parser 错误计数。100 ms 独立显示 timer 更新年龄与 CSV 状态，不读取串口。
+
+LIVE = 新鲜且 valid/running=1、error_flags=0；超过 500 ms 没有完整 ADC 帧或连接后仍未收帧为 STALE；故障快照或 RX/parser 异常为 INVALID；未连接为 DISCONNECTED。stale 保留最后 raw 并标年龄，断开清除旧 raw。所有健康状态只用于观察，不改变 MPC/PWM。
+
+选择新路径、开始/停止 ADC 记录；使用现有 15 列 CSV（UTC timestamp_pc、frame_count、timestamp_mcu、raw0...raw5、错误计数、valid/running），与 MPC CSV 完全分开，拒绝覆盖已有文件。256 行有界 Queue，GUI 用 put_nowait，不等待磁盘；文件由专用线程创建/逐行写入/刷新/关闭。队列满或写盘失败会明确显示并停止记录，控制继续。断开结束当前日志，重连需重新开始新文件。
+
+## 软件验证与保护证明
+
+- 新 GUI 集成 27 PASS；原 CURT parser/CLI 105 PASS；真实 GUI __main__、已保存 MPC 参数、模型、事件循环和 timer 退出清理 PASS。
+- GUI smoke PASS：视觉/路径、MPC 开始/停止/重启、手动六路电流、手动磁力和诊断；shared 6/6、multirate 18/18、solver/protocol/safety 25/25、MPC/worker 专项 6 PASS。
+- 原生根目录 pytest：208 passed、4 个既有 test(fn) 装饰器收集错误、288 subtests passed；仅复用 artifacts 兼容适配器后：208 passed、288 subtests passed。共享测试没有为修复历史错误而改动。
+- 三个 Python 改动/新增文件的 mypy（ignore-missing-imports + follow-imports=silent）PASS；新 ADCLogger strict PASS。全上位机仍有原有 7 个类型诊断；默认修改文件检查仍有原有 2 个 pyserial 类型桩缺失问题。
+- ruff 原有 104 项 → 104 项，新增 0；black 原有 15 个需格式化文件 → 15 个，新增 0，两个新文件 PASS；只格式化新 ADC 方法及新文件，未整仓格式化。
+- 新监视/CSV函数 stdlib trace + dis 行覆盖 97.51%，不声称整个历史 GUI 的覆盖率；未安装依赖或 coverage 包。
+- 合成串口 300 次测量：单帧 RX 平均约 0.12 ms、14 帧突发约 0.40 ms，最大分别约 0.77/0.67 ms；这是软件测量，不代替真实相机/串口调度验证。
+- CURT Tab 已用模拟端口做实际布局截图。offscreen 默认字体缺字，仅预览显式加载既有系统雅黑字体；生产代码未改字体。
+
+271 个受保护基准文件字节一致，包括 MPC/multirate/solver/estimators/friction、模型、配置、设置、旧测试、CLI、仿真和全部固件。主 GUI 只有 __init__、_build_ui、toggle_serial、closeEvent 四个既有函数改变；其他既有函数逐个比较完整源码完全相同，包含 send_commands、视觉/状态估计、路径、MPC、手动控制和诊断。没有恢复 PD/PID/RL，没有标定 raw→A、ADC反馈或电流 PI。
+
+审查证据在 `artifacts/curt-gui-20261004/`：phase-a.json、checkpoint-status、cached diff、protection-check.json、test-results、质量日志、new-code-coverage、rx-benchmark 与 GUI 预览。临时 QA 工具副本/缓存已清理，不进入 Git。
+
+## 后续实板操作（本轮未执行）
+
+1. 由用户确认并烧录 `artifacts/curt-telemetry-20261003/pwm_02.hex`，复位；本轮未重新构建或烧录固件。
+2. 关闭独立 curt_telemetry.py 与串口助手对同一 COM 的占用，在 dipole-control 目录启动主 GUI，选实际 COM 后连接。连接按原流程发送全零帧；先保持控制停止，可先不打开相机。
+3. 在 CURT / ADC 页观察 LIVE、raw0...raw5、valid=running=1、error_flags 与错误计数，以及 timestamp/data age 是否持续更新；正常约 10 Hz telemetry 对应 frame_count 每帧约 +50、总体约 +500/s。
+4. 选择新的 ADC CSV，开始记录后停止，检查独立 15 列和逻辑 raw 顺序；断开/重连验证旧半帧/快照不延续，普通停止/急停后接收仍工作。
+5. 用户需要时在原安全流程下逐路低幅手动驱动，确认 raw0...raw5 对应 Pole1/3/5/4/6/2；再开相机/小路径验证 MPC 与观察共存，不能把 raw 当成真实电流或反馈。
+6. 保存实板结果后，再单独规划外部电流表标定及后续 PI；Phase B 是否建立第二个 checkpoint 由用户审查决定，本轮没有第二次 commit 或 push。
+
+
+# CURT 分层 Git checkpoint（2026-10-04）
+
+用户本轮明确要求将现有 CURT 工作整理成底层 telemetry、GUI 集成两个独立提交。本文早期“Phase B 尚未提交 / 等待审查决定”是历史记录，当前提交边界以本节与页首摘要为准。本轮只整理提交并更新记忆，没有继续修改功能。
+
+- 前置 MPC-only checkpoint：`10f6c164608aa8af83872cbe3420666e3ef79879`。
+- 底层 telemetry：`7e624ccfc9e1e54b3b2feb9a317d36213e2c25b2`，`feat: add CURT telemetry pipeline`，16 个文件。包含 STM32 `main.c` 的既有 telemetry 接入、`uart_telemetry.h/c`、两个 Keil 工程配置、固件测试/桩/保护 fixture 与 tests README，以及独立 `curt_telemetry.py` 和 parser/CLI 测试；不包含 GUI 集成。
+- GUI 集成：本节所在提交，`feat: integrate CURT telemetry into MPC GUI`，仅 5 个文件：`dipole-control/magnetic_dipole_pid.py`、`dipole-control/adc_csv.py`、`dipole-control/tests/test_gui_curt_telemetry.py`、`dipole-control/README.md`、`PROJECT_MEMORY.md`。SHA 可由 `git log -1` 获取。
+- 每次提交前均核对完整 `git diff --cached`、`git diff --cached --stat` 和精确文件清单；CRLF 文件使用 `core.whitespace=cr-at-eol` 进行 whitespace 检查，保留原编码与换行。artifacts、临时日志、CSV、缓存均未纳入提交，未 push。
+- 本轮复核：parser/CLI 105 项与 GUI 27 项，共 132 PASS；ADC 基础设施 16 PASS；固件 telemetry 集成保护 3 PASS。首次 pytest 因系统临时目录权限产生 fixture 错误，指定工作区 artifacts 内的独立临时目录后通过；没有因此修改源码或测试。
+- 主 GUI 与前置 MPC-only checkpoint 对比：105 个既有函数源码一致，仅初始化、UI、串口生命周期与退出清理四处包含此前完成的 CURT 接入。MPC、solver、multirate、Kalman、ESO、R-L current model 及发送函数保持。
+- 7 个既有 mypy 问题和 2 个 pyserial 类型桩问题留待后续，未修复、未安装类型桩。实板烧录、CURT 标定及电流 PI 仍未执行。
