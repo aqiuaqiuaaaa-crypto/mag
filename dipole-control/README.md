@@ -1,24 +1,23 @@
-# 180 磁偶极子磁力解算 PID 磁控程序
+# 180 磁偶极子 MPC 实机磁控程序
 
-基于磁偶极子标定模型的磁微机器人控制程序：视觉闭环输出期望磁力，由 **180 磁偶极子
-标定模型**（6 路电磁铁 × 每路 30 个偶极子）经约束正则化逆解求 6 路电流，经串口发给
-STM32。
+主 GUI 的唯一自动轨迹控制器是 **MPC**。视觉状态与路径参考进入 10Hz 工作线程，
+由 **180 磁偶极子标定模型**（6 路电磁铁 × 每路 30 个偶极子）计算六路电流目标，
+30Hz 执行层经统一安全限幅和串口封帧发送到 STM32。
 
-针对磁珠贴底运动的底面摩擦问题（下方电磁铁需要明显更大电流、启动困难、PID 误差
-积累），控制架构升级为：
-
+```text
+Camera → Vision → Kalman/EMA/RAW + ESO → Path Reference → SharedState
+  → ControlWorker / ForceMPC (10Hz) → DipoleSolver [B;F]=A·I 伪逆
+  → CurrentExecutor (30Hz) → send_commands() → Serial → STM32
 ```
-视觉 → 状态估计(Kalman/EMA/RAW) → 路径目标与目标速度(弧长重采样+切向速度)
-  → 实机简易 PD（推荐）或高级 PID/MPC
-  → 单线圈视觉扫描标定模型 XY → 相机世界 XY（旋转/镜像）
-  → 可选速度前馈 Kv·c·v_des + 流体阻力补偿 c·(Kv·v_des−v)
-  → 摩擦前馈补偿 μ_eff·N·tanh(v_des/v_eps) → ESO 扰动补偿(−z3)
-  → Fz 减摩控制器(降低法向压力) → F_cmd=[Fx,Fy,Fz]
-  → GUI 指定 B_des → 180-MDM 构造 [B;F]=A·I → Moore–Penrose 伪逆
-  → 整数指令 → 按最终发送电流重算 F_actual → STM32(43 字节帧)
-```
+
+保留 GUI 目标磁场方向/模长、模型到相机坐标标定、Fz 减摩、手动六路电流、
+手动磁力和诊断/标定。2026-10-04 移除旧 PD/PID 实机自动控制链；入口文件名仍为
+`magnetic_dipole_pid.py`。强化学习 RL/ES-MLP 已于 2026-10-04 从正式工程移除；
+独立仿真器保留，CURT 遥测仍是独立工具，后续再集成主 GUI。
 
 ## 运行方法
+
+以下命令在 `dipole-control/` 目录执行；入口文件名保持不变。
 
 ```bash
 pip install -r requirements.txt
@@ -40,16 +39,11 @@ python magnetic_dipole_pid.py    # 启动 GUI
 | `config.py` | 所有物理/控制参数集中配置（唯一来源） |
 | `dipole_solver.py` | 180 偶极子磁场/解析梯度/约束正则化电流逆解（纯 numpy） |
 | `mpc.py` | 10Hz 线性 MPC（准静态模型，输出目标磁力） |
-| `multirate.py` | 多速率调度：10Hz 工作线程 + 30Hz 电流执行层 + RL 线圈估计 |
-| `magnetic_dipole_pid.py` | PySide6 GUI 主程序（30Hz 主循环 + 10Hz 工作线程） |
-| `rl_policy.py` | RL 核心模块：numpy MLP 策略 + 仿真环境 + ES 训练（自测：`py rl_policy.py`） |
-| `train_rl.py` | RL 策略训练脚本（`py train_rl.py`，默认 300 轮约 2.5 分钟） |
-| `rl_path_control.py` | **RL 版控制程序 GUI**（视觉追踪 + 策略推理，约束与 PID 版一致） |
+| `multirate.py` | 多速率调度：10Hz 工作线程 + 30Hz 电流执行层 + R-L 线圈估计 |
+| `magnetic_dipole_pid.py` | MPC-only PySide6 实机 GUI（30Hz 主循环 + 10Hz 工作线程） |
 | `tests/test_solver.py` | 25 项严格单元测试 |
-| `tests/test_rl.py` | 9 项 RL 单元测试 |
 | `smoke_test.py` | 无头冒烟测试（不需相机/串口） |
 | `models/N30LM_six_coils_180dipoles.json` | 标定偶极子模型 |
-| `models/rl_policy.json` | 训练好的 RL 策略（ES-MLP） |
 
 ## 系统规格（严格固定）
 
@@ -82,7 +76,7 @@ python magnetic_dipole_pid.py    # 启动 GUI
 
 ### GUI 主控制链：field-force Moore–Penrose 伪逆
 
-当前 GUI、简易闭环、PID 和 MPC 调用 `solve_field_force_pseudoinverse()`：
+主 GUI 的 MPC 工作线程、手动磁力与方向/摩擦诊断调用 `solve_field_force_pseudoinverse()`：
 由 GUI 给定 `B_des=B0·b_hat`，令 `M_des=m0·b_hat`，再由 180-MDM 的单位电流
 场 `Bc` 和梯度 `Gc` 实时构造 `A_B=Bc.T`、`A_F[:,j]=Gc[j].T@M_des`，得到
 `[B;F]=A_BF·I`。B、F 行量纲归一化后计算 Moore–Penrose 伪逆；无约束时
@@ -121,37 +115,15 @@ python magnetic_dipole_pid.py    # 启动 GUI
 1. 顶部先把“电流上限”设为 30~50，打开相机并稳定识别磁珠。
 2. 在“诊断”页点击“扫描六路并自动标定”。程序逐路静置、缓升并仅统计稳定段速度，
    用模型单线圈力方向和视觉速度方向拟合二维正交坐标映射；该映射会持久化。
-3. 选择“实机简易闭环（推荐）”。此模式只使用位置/速度 PD，不依赖尚未标定的摩擦、
-   ESO 和 Fz 参数；每帧按 GUI 指定的磁场方向/模长和目标力构造整体驱动矩阵，
-   再通过 Moore–Penrose 伪逆求六路电流。
+3. 在“路径与追踪”页设置路径、速度、采样间距和 MPC 参数，确认目标磁场方向/模长，
+   点击“开始追踪”。自动控制唯一为 MPC；Kalman/ESO/Fz 设置在“高级控制”页，
+   10Hz 工作线程生成磁力目标和六路电流，30Hz 执行层插值并发送。
 4. 先用小路径、低速度验证。若扫描 RMS 超过 30°，程序拒绝应用标定并提示检查
    模型通道顺序与 STM32 a0~a5 接线，避免用错误映射闭环。
 
-## 强化学习版本（rl_path_control.py）
-
-与 PID 版并行的另一套控制程序，控制器换成 ES 训练的 numpy MLP 策略：
-
-- **训练**：`py train_rl.py`（可用 `--iters/--pop/--sigma/--lr/--seed` 调参，
-  `--quick` 快速冒烟）。仿真环境 = 180 偶极子标定模型的力 + 斯托克斯准静态动力学
-  v = F/c（30Hz 积分，5% 力噪声），奖励 = 前进进度 + 到点奖励 − 动作平滑罚 −
-  电流幅值罚（L1 风格）。训练产出 `models/rl_policy.json`（含评估元数据）。
-- **动作映射（训练/部署同一实现）**：策略输出 a∈[-1,1]⁶ → 每帧指令增量
-  Δcmd = clip(a×9, ±9) → cmd = clip(round(cmd_prev+Δcmd), ±99)。
-  斜率（9 指令/帧 = 0.1818A ≤ 0.2A）与幅值（±99 ↔ ±2A）约束**结构性保证**，
-  且实机发送仍经过统一安全层；指令整数化在训练环境内一致执行（仿真-实机对齐）。
-- **状态（10 维）**：目标相对位置 /4mm、速度 /15mm/s、当前指令 /99。
-- **部署**：`py rl_path_control.py` — 视觉追踪（与 PID 版同一识别栈）、路点容差
-  推进、手动电流、急停、参数持久化（独立文件 rl_gui_settings.json）、实验 CSV
-  （复用同一表头，controller_mode="rl_track"，RL 无显式 F_des 记 0，F_act 为
-  发送电流对应的真实力）。默认 300 轮训练策略的仿真评估：**路点完成率 100%，
-  平均终点距 0.39mm**；单帧策略推理 ~0.02ms。
-- 注意：策略在仿真中训练（仿真-现实差距主要来自力标定精度与未建模摩擦/近壁效应），
-  首次实机使用建议小路径、盯住急停。策略若学习到饱和用流（±99 常见），可在训练时
-  调大电流幅值罚权重（rl_policy.py PathEnv.step 中 0.0002）。
-
 ## 电流安全层（统一）
 
-主 GUI 的所有模式（简易闭环/PID/MPC/手动磁力/手动电流）发送前必经：
+主 GUI 的所有模式（MPC/手动磁力/手动电流/诊断）发送前必经：
 用户运行时幅值上限（默认 ±50，绝不超过协议 ±99）+ 斜率限幅 ≤ **9 指令/帧**
 （= 0.1818A，严格 ≤ 0.2A/帧；取 9 而非 10
 是因为 10×2/99=0.2020A 略超 0.2A）。
@@ -186,6 +158,9 @@ python magnetic_dipole_pid.py    # 启动 GUI
 
 ## 多速率控制架构（新增）
 
+这里的 **R-L** 指电阻—电感一阶电流模型，不是 Reinforcement Learning；
+**ESO** 是扩张状态观测器，仍为 MPC 提供扰动估计。
+
 ```
 视觉 30Hz → Kalman 30Hz → MPC 10Hz → MDM 逆解 10Hz → 电流执行 30Hz → PWM 20kHz(STM32)
 ```
@@ -196,7 +171,7 @@ python magnetic_dipole_pid.py    # 启动 GUI
   写入线程安全 `SharedState`；工作线程使用独立的求解器缓存，**绝不阻塞或污染
   30Hz GUI 正向诊断**。
 - **30Hz 电流执行层**（`multirate.CurrentExecutor`）：100ms 窗口内目标插值
-  (α=1/3,2/3,1) → 斜率限幅 ≤9 指令/帧 → 整数量化 → 串口；RL 线圈模型
+  (α=1/3,2/3,1) → 斜率限幅 ≤9 指令/帧 → 整数量化 → 串口；R-L 线圈模型
   L·dI/dt=V−R·I（V=(cmd/99)·24V，稳态 I∞=cmd×2/99 与映射自洽，τ=22.75ms）
   维护 **I_est（估计电流，无电流传感器）**；用 I_est 走 MDM 正向模型得 B/G/∇|B|/F_est。
 - **状态闭环**：GUI 每个 30Hz 周期向 MPC 发布最新位置、速度和实际已发送整数指令；
@@ -215,61 +190,44 @@ python magnetic_dipole_pid.py    # 启动 GUI
 - **磁矩对齐诊断**：τ_r = ζ_r/(m_b·|B|)，ζ_r=8πηa³=3.14e-9 N·m·s（不写死 15.4ms——
   它随 |B| 变化，B≈0.4mT 时 τ_r≈15.7ms）；ratio=T_current/τ_r <5 时告警
   "磁矩对齐非准静态"但不停止。低场检测 |B|<B_MAG_THRESHOLD_T 独立告警。
-- **控制器选择**：路径页下拉包含“实机简易闭环（推荐）”、高级 PID 和 MPC；
-  简易模式为默认值，三种模式共用 field-force 伪逆与统一电流安全层。
+- **唯一自动控制器**：路径页固定显示 MPC，不再提供控制器选择；每次开始追踪
+  都创建新的 SharedState、CurrentExecutor 和 10Hz ControlWorker。
 - **诊断页多速率状态**：各层标称与实测频率、F_target、Bmag、τ_align、T/τ、I_est、
-  MDM 耗时；10Hz MPC/MDM 日志随实验 CSV 另存 `*_mpc10hz.csv`。
+  MDM 耗时；“保存实验CSV”直接保存 24 列 10Hz MPC/MDM 日志，默认名
+  `experiment_mpc10hz.csv`，不再生成旧实机控制日志。
 
-## 高级控制与诊断（状态估计 / 前馈 / ESO / 减摩）
+## 高级控制与诊断（状态估计 / ESO / 减摩）
 
 - **Fz 减摩**：N = max(N_min, W_eff − Fz_lift)，W_eff=(ρ珠−ρ液)·V·g≈33.4µN；
   Fz_lift = clip(W_eff·(1−ratio), 0, Fz_max)，默认 ratio=0.4（N 降至 40%，
   **适度减压、不做完全悬浮**）。
-- **摩擦模型**：F_fric = −μ_eff·N·tanh(v/v_eps)，μ_eff = μ_d+(μ_s−μ_d)exp(−(v/v_eps)²)
-  静→动平滑过渡（无跳变）；摩擦前馈补偿沿 v_des 方向、幅值随减摩后的 N 变化；
-  可开关（默认关，须先标定 μ_s/μ_d）。
-- **速度前馈 + 流体阻力补偿**：合并为 c·(Kv·v_des − v)（Kv=1 时 = 前馈 c·v_des +
-  反馈 −c·v），同一阻力不重复补偿；Kv、路径速度、弧长重采样间距均在 GUI。
 - **ESO**：绕一阶过阻尼动力学 c·v = F + d（ẍ = b0·(u+d), b0 = 1/c ≠ 1/m）建立
   三阶离散 ESO（β1=3ω0, β2=3ω0², β3=ω0³；fal 函数；真实 dt），z3 为扰动力估计
-  （限幅可调），补偿 F_cmd −= z3。30Hz 下 ω0 建议 ≤6 rad/s（默认 4）。
+  （限幅可调）。GUI 以执行器估计磁力更新 ESO，z3 通过 `eso_d` 进入 MPC 输入；
+  30Hz 下 ω0 建议 ≤6 rad/s（默认 4）。
 - **状态估计**：KALMAN（默认，[x,y,vx,vy] 常速度 KF，Q/R 可调）/ EMA / RAW；
   视觉丢失 >1s 自动正常停止。
 - **方向测试模式**：恒定三维 F_test，实时显示 F_des/F_act/幅值误差/目标方向/
-  实际方向/方向误差——区分 PID 问题、逆解问题与摩擦问题。
+  实际方向/方向误差——区分自动控制问题、逆解问题与摩擦问题。
 - **摩擦标定模式**：+X 方向逐级 Fz（默认 0~40µN）下 Fx 斜坡，运动判定后记录
   F_start(Fz) → CSV（Fz, N_est, F_start, velocity），拟合 μ_s·N。
 - **线圈方向诊断表**：6 线圈各 ~1A 顺序扫描，模型 (Fx,Fy,Fz) vs 实验视觉平均
   速度，快速核对线圈编号/坐标/电流方向一致性。
-- **执行器动态**（可选，默认关）：一阶估计 I_est[k+1]=a·I_est[k]+(1−a)·I_cmd[k]，
-  τ=L/R≈22.8ms（L=273mH, R=12Ω）；标记为**估计电流**（无电流传感器），供 ESO 输入。
-- **性能**：逐帧记录 vision/estimator/controller/solver/serial/total 耗时，
-  连续 5 帧超 33.3ms 状态栏显示"控制周期超时"（不自动改参数）。
-- **CSV 升级**：56 列（位置/速度/目标/误差/PID/前馈/阻力/摩擦/ESO/Fz/三维 F_cmd
-  与 F_act/各路指令与电流/Σ|I|/力误差/方向误差/法向力/摩擦估计/目标函数/各阶段
-  耗时等），可直接用于论文绘图。
+- **执行器动态**：MPC 的 CurrentExecutor 保持原有一阶 I_est 电流估计及 B/F 诊断，
+  I_est 是模型估计值；原实机链的独立执行器估计开关已移除。
+- **性能**：状态栏保留各阶段耗时和超时提示；连续 5 帧超 33.3ms 显示“控制周期超时”。
+- **MPC CSV（24 列）**：timestamp、mpc_ms、solver_ms、mpc_cost、ref_x/ref_y、
+  vref_x/vref_y、Fx_target/Fy_target、force_error、converged、horizon、W_pos/W_vel/
+  W_u/W_du、Fmax、a0_cmd..a5_cmd。字段顺序、工作线程生产逻辑和数值语义不变。
 
-## 控制器
+## 通用逆解与视觉
 
-- PID X/Y 独立参数（Kpx/Kix/Kdx、Kpy/Kiy/Kdy），Fx = Kpx·ex + Kix·∫ex − Kdx·vx，
-  含积分限幅、微分低通（速度 EMA）、位置死区、输出范数限幅。
-- **稀疏约束模式**（"路径与追踪"页"约束模式"下拉，对手动磁力与自动追踪同时生效），
-  限制最大同时工作电磁铁数：
-  - **单极模式（≤1 路）**：指令域整数穷举精确求解（每路箱内 ≤19 值 × 6 路 + 全零，
-    一次批量力评估，~0.7ms）。
-  - **三路模式（≤3 路）**：无约束连续解 → 稀疏投影（保留 |cmd| 最大的前 3 路，斜率箱内
-    无法归零的通道强制占名额）→ 两个候选子集（投影子集 + 单线圈力对齐度子集）各自
-    做**子空间连续重解**（非活动通道箱收缩为 [0,0] 后复用带箱约束正则化 GN）取最优
-    → 保持约束的整数贪心精修。单次 7~13ms（< 33ms 预算）。
-  - 两种模式下**切换/停用线圈均受斜率限制**（≤0.1818A/帧），须经零衰减；开启时若
-    上一帧无法归零的通道数超名额，先按斜率归零过渡再进入约束解算。
-  - 注意物理代价：每路线圈对磁珠的力方向固定（只能正向缩放），路数越少方向补偿
-    能力越差，偏轴目标误差必然偏大（收敛判据如实报告，不假装收敛）。
-- 可选"阻力前馈"（默认关）：珠受阻力 F_drag = −c·v（c = 6πμr ≈ 9.42 µN/(mm/s)），
-  前馈补偿 F_des += +c·v。
+- 实机运动控制始终使用六路 field-force 伪逆，以同时满足目标力和磁场矢量；
+  路径页的约束模式控件保留，开始追踪时固定为六路自由模式。
+- DipoleSolver 的通用力-only、单极/三路稀疏逆解接口及其测试保持原样。
 - 视觉：GRAY（默认）/HSV 两模式 + 形态学开/闭运算 + 面积/圆度/半径过滤。
-- 实验 CSV：时间戳、位置/目标/误差/速度、期望/实际力、各路指令与电流、Σ|I|、
-  力误差、目标函数、收敛/约束标志、视觉检测、模式、解算耗时——可直接用于论文绘图。
+- 路径：圆、矩形、三角形、鼠标绘制、路径速度和弧长采样间距均保留。
+- 历史公共 `CSV_HEADER` 仍供独立工具使用；主 GUI 不再生产或导出该旧格式。
 
 ## GUI 功能
 
@@ -279,6 +237,12 @@ python magnetic_dipole_pid.py    # 启动 GUI
 “识别参数”页可保存带绿色路径和全部画面标注的截图，并可开始/结束 MP4 或 AVI 录像；
 关闭相机或退出程序时，正在录制的视频也会自动完成封装并保存。
 
+## 历史路线（historical / removed）
+
+RL/ES-MLP 曾作为独立实验路线存在；其 GUI、策略部署、训练代码、专用测试、
+策略权重和独立设置现已删除。当前正式实机自动轨迹控制仅使用 MPC。
+历史分析报告和验证日志保留作记录，不代表当前可运行功能。
+
 ## 假设与注意事项
 
 - 磁珠限制在 z=0 平面（Fz 期望为 0，但底层模型保留完整 Fx/Fy/Fz 与 G 张量）。
@@ -286,3 +250,56 @@ python magnetic_dipole_pid.py    # 启动 GUI
 - 解算可输出负电流（协议 ±99 双向）。
 - 指令量化 0.0202A/格：小力目标下 2% 收敛判据可能因量化不可达（单元测试与 CSV
   如实记录），闭环控制可校正。
+
+## CURT raw 串口遥测（2026-10-03）
+
+独立工具 `curt_telemetry.py` 接收新版固件的 10 Hz 遥测。ADC 内部仍为 500 Hz，
+工具只显示/记录未标定 raw，不做安培换算，也不参与 PI 或 GUI 控制。
+
+本项目当前解释器是 `C:\Python314\python.exe`，已补齐 PySide6 6.11.2 和
+pyserial 3.5。numpy、OpenCV、pip 版本保持原样。
+
+先烧录本轮 telemetry HEX（根目录 `artifacts/curt-telemetry-20261003/pwm_02.hex`），
+关闭 GUI/串口助手对同一 COM 口的连接。在 `dipole-control` 目录运行：
+
+```powershell
+C:\Python314\python.exe -B -m serial.tools.list_ports
+C:\Python314\python.exe -B curt_telemetry.py --port COM4 --duration 30 --csv curt_raw.csv
+```
+
+COM4 是示例，请替换为当前实际端口；本轮开发环境未检测到 COM 口。默认模式只读，
+进入/退出均不发送控制命令。CSV 使用 UTC ISO 时间，逐帧刷新，拒绝覆盖已有文件。
+终端打印 raw、有效/运行状态、错误计数、估计采样频率、拒绝帧数；5 秒没有完整遥测时提示等待。
+
+固件帧格式（14 个十进制无符号字段，一行 CRLF）：
+
+```text
+@ADC,<frame_count>,<timestamp_ms>,<raw0>,<raw1>,<raw2>,<raw3>,<raw4>,<raw5>,<error_flags>,<overrun_count>,<dma_error_count>,<dma_late_count>,<valid>,<running>\r\n
+```
+
+`timestamp_ms` 是完整快照发布时间。`valid`/`running` 为 0 或 1；采样失败时仍发故障状态，
+raw 可保留最后一帧。采样频率用相邻快照的 frame_count 和 MCU 时间增量计算，不把
+10 Hz 的串口帧率当作 ADC 采样率。正常相邻遥测约增加 50 个 frame_count，总体约 500/s。
+解码器处理拆包、粘包、截断和前面无换行的旧 12 字节 echo；控制帧/未知前缀不会被解析为 ADC。
+
+如需同一端口上同时驱动和记录，可以显式指定原 43 字节 signed 命令。下例先发全零并记录
+2 秒基线，随后以 30 Hz 重发仅 a0 为 +05 的固定命令；10 秒到期或 Ctrl+C 时尝试发全零：
+
+```powershell
+C:\Python314\python.exe -B curt_telemetry.py --port COM4 --duration 10 --csv curt_a0.csv --command 'a0:+05,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00'
+```
+
+`--command` 是显式测试选项，数值单位是已有 PWM 命令；与 GUI 共用原协议，但由独立进程
+持有串口。不要同时用两个程序打开同一 COM 口。串口断开时全零发送可能失败，原固件没有新增
+通信超时停机机制。依次只改变 a1..a5 的非零槽位，确认主变化分别对应 raw[1]..raw[5]。
+逻辑到物理顺序仍为 `[Pole1, Pole3, Pole5, Pole4, Pole6, Pole2]`。
+
+独立 parser/记录器测试：
+
+```powershell
+C:\Python314\python.exe -B -m pytest -q -p no:cacheprovider tests/test_curt_telemetry.py
+```
+
+测试使用内存串口，不连接或驱动实际硬件。原上位机测试的缺依赖项已全部解决；默认环境
+完整运行是 66/67，一个线程时序测试越限。仅在诊断子进程设
+`OPENBLAS_NUM_THREADS=1`、`OMP_NUM_THREADS=1` 后该组 18/18 通过，原配置和控制代码未改。

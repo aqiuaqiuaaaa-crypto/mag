@@ -2,9 +2,11 @@
 """无头冒烟测试：不依赖相机/串口，验证 GUI 类与控制链路（约 30Hz 控制帧）"""
 import os
 os.environ["QT_QPA_PLATFORM"] = "offscreen"
-import sys
+import csv
+from unittest.mock import patch
 import time
 import numpy as np
+from numpy.typing import NDArray
 import cv2
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
@@ -13,18 +15,42 @@ import magnetic_dipole_pid as m
 
 # 关键：把设置文件隔离到临时路径，避免读入/覆盖用户真实保存的 GUI 参数
 import tempfile
-m.SETTINGS_FILE = os.path.join(tempfile.gettempdir(), "smoke_gui_settings.json")
-if os.path.exists(m.SETTINGS_FILE):
-    os.remove(m.SETTINGS_FILE)
+settings_dir = tempfile.TemporaryDirectory(prefix="mpc_smoke_")
+m.SETTINGS_FILE = os.path.join(settings_dir.name, "gui_settings.json")
 
 app = QApplication([])
 w = m.MagneticDipoleControl()
+w.timer.stop()  # 控制帧由测试显式推进，避免事件循环重入。
+assert w.ser is None and w.cap is None
+assert "MPC" in w.windowTitle()
+
+
+class MemorySerial:
+    """只记录帧，不打开或访问任何 COM 口。"""
+
+    def __init__(self) -> None:
+        self.frames: list[bytes] = []
+        self.closed = False
+
+    def write(self, data: bytes) -> int:
+        assert len(data) == m.cfg.SERIAL_FRAME_BYTES
+        self.frames.append(data)
+        return len(data)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+serial_sink = MemorySerial()
+w.ser = serial_sink
 w.show()
 w.resize(1000, 650)
 app.processEvents()
 assert w.video.width() < m.cfg.DISP_W, "视频区应随小窗口收缩"
 assert abs(w.video.width() / w.video.height() - 16.0 / 9.0) < 0.05
-assert w.control_scroll.geometry().right() <= w.centralWidget().width(), \
+central_widget = w.centralWidget()
+assert central_widget is not None
+assert w.control_scroll.geometry().right() <= central_widget.width(), \
     "控制面板不得被挤到窗口右侧之外"
 
 # 模型严格校验通过，自动控制可用
@@ -77,7 +103,9 @@ w.make_circle(400)
 # 回归：手动"实时发送"开启时点开始追踪，必须自动退出手动模式，
 # 否则 tick 的 elif 分派会让追踪分支失效（目标点冻结在起点、电流不动）
 w.chk_cur_live.setChecked(True)
+w.estimate_state(0.033, True)
 w.start_tracking()
+assert w.worker is not None and w.worker.is_alive()
 assert not w.chk_cur_live.isChecked(), "开始追踪应自动退出手动电流实时发送"
 assert not w.chk_force_live.isChecked()
 w.estimate_state(0.033, True)          # 初始化状态估计器到磁珠当前位置
@@ -85,22 +113,23 @@ print("full_path 点数:", len(w.full_path))
 
 # 闭环模拟：磁珠以 F_des/阻力系数 稳态响应（无相机，手动喂观测给估计器）
 drag = w.solver.drag_uN_per_mm_s(1000.0)
-for step in range(180):
+for step in range(60):
     if w.tracking and w.last_solver_rec:
         v = np.clip(w.last_solver_rec["achieved_force"][:2] * 1e6 / drag, -30, 30)
         new_mm = w.state_pos_mm + v * 0.033
         px = w.world_mm_to_px(new_mm)
         w.bead = (px[0], px[1], 300)
         w.estimate_state(0.033, True)      # 无相机：显式喂入观测
+    time.sleep(0.034)  # 给真实 10Hz worker 留出运行时间。
     w.tick()          # 完整主循环（视觉占位/控制/渲染/状态栏）
-print("模拟 180 帧完成, 追踪中:", w.tracking, " 目标索引:", w.target_idx)
-assert len(w.exp_log) > 0 and len(w.traj_px) == len(w.traj_mm)
-print("CSV 列数:", len(m.CSV_HEADER), " 实际行宽:", len(w.exp_log[0]))
-assert len(w.exp_log[0]) == len(m.CSV_HEADER)
+print("模拟 60 帧完成, 追踪中:", w.tracking, " 目标索引:", w.target_idx)
+assert w.exp_log_mpc and len(w.traj_px) == len(w.traj_mm) > 0
+assert all(len(row) == 24 for row in w.exp_log_mpc)
 assert np.allclose(w.last_solver_rec["requested_B_direction"],
                    m.cfg.CONTROL_FIELD_DIRECTION)
 assert w.last_solver_rec["solver_mode"] == "field-force-moore-penrose"
 assert w.last_solver_rec["requested_B_magnitude_mT"] == 10.0
+w.emergency_stop()
 
 # 手动磁力（约束逆解 + F_act 按发送电流重算）
 w.bead = (960, 540, 300)
@@ -154,16 +183,24 @@ for step in range(20):
         px = w.world_mm_to_px(w.state_pos_mm + v * 0.033)
         w.bead = (px[0], px[1], 300)
         w.estimate_state(0.033, True)
+    time.sleep(0.034)
     w.tick()
-print("[B;F] 伪逆联合控制 20 帧 OK 末帧指令:", w.last_sent_cmd,
-      " 模式列:", w.exp_log[-1][-2] if w.exp_log else "-")
+assert w.shared.get_I_target()[1] > 0
+print("[B;F] MPC 伪逆联合控制 20 帧 OK 末帧指令:", w.last_sent_cmd)
 w.normal_stop()
 
 # normal_stop 与 emergency_stop
 w.normal_stop()
-assert w.stopping
+assert w.stopping and w.shared.stopped() and w.worker is None
+for _ in range(8):
+    previous = list(w.last_sent_cmd)
+    w.tick()
+    assert max(abs(a - b) for a, b in zip(w.last_sent_cmd, previous)) <= MD
+assert w.last_sent_cmd == [0] * 6 and not w.stopping
+w.send_commands([30] * 6)
 w.emergency_stop()
 assert w.last_sent_cmd == [0] * 6 and not w.stopping
+assert serial_sink.frames[-1] == m.build_command([0] * 6)[0].encode("ascii")
 print("急停帧:", m.build_command([0] * 6)[0].strip())
 
 # 回归：到达最后一个路径点后必须结束，不能在零长度切线处生成标量 v_des
@@ -173,20 +210,11 @@ w.full_path = [(960, 540)]
 w.path_px = list(w.full_path)
 w.target_idx = 0
 w.tracking = True
-w.active_controller = "PID"
 w.control_step(1.0 / 30.0)
 assert not w.tracking and w.stopping
 w.emergency_stop()
 
 # MPC GUI 集成：主循环应发布状态/参数，工作线程输出安培目标，30Hz 层执行命令
-w.active_controller = "MPC"
-mpc_route_calls = []
-original_mpc_step = w.mpc_track_step
-w.mpc_track_step = lambda dt: mpc_route_calls.append(dt)
-w.control_step(1.0 / 30.0)
-assert len(mpc_route_calls) == 1, "MPC 选择后 control_step 不得落入 PID 分支"
-w.mpc_track_step = original_mpc_step
-w.combo_controller.setCurrentIndex(2)
 w.spin_mpc_horizon.setValue(4)
 w.spin_mpc_w_pos.setValue(2.5)
 w.spin_mpc_w_vel.setValue(1.5)
@@ -198,7 +226,7 @@ w.state_pos_mm = np.array(w.px_to_world_mm(w.bead[:2]))
 w.state_vel_mm = np.zeros(2)
 w.make_rect()
 w.start_tracking()
-assert w.active_controller == "MPC" and w.worker is not None
+assert w.worker is not None and w.worker.is_alive()
 first_shared = w.shared
 for _ in range(12):
     time.sleep(0.04)
@@ -218,6 +246,16 @@ for _ in range(4):
     time.sleep(0.04)
     w.mpc_track_step(1.0 / 30.0)
 assert w.worker.mpc_x.wp == 3.5
+# 正式实验导出仅包含原有 24 列 MPC 数据，保留字段顺序和数据值。
+csv_path = os.path.join(settings_dir.name, "experiment_mpc10hz.csv")
+with patch.object(m.QFileDialog, "getSaveFileName", return_value=(csv_path, "CSV (*.csv)")), \
+        patch.object(m.QMessageBox, "information"):
+    w.save_traj()
+with open(csv_path, encoding="utf-8", newline="") as f:
+    rows = list(csv.reader(f))
+assert len(rows[0]) == 24 and rows[0][:4] == ["timestamp", "mpc_ms", "solver_ms", "mpc_cost"]
+assert len(rows) == len(w.exp_log_mpc) + 1
+assert rows[1] == [str(value) for value in w.exp_log_mpc[0]]
 w.emergency_stop()
 assert first_shared.stopped()
 # stop Event 不可复用：第二次 MPC 启动必须创建新的 SharedState 和工作线程。
@@ -227,6 +265,29 @@ w.start_tracking()
 assert w.shared is not first_shared and not w.shared.stopped()
 assert w.worker is not None and w.worker.is_alive()
 w.emergency_stop()
+
+# 合成相机验证视觉主循环，不访问真实摄像头。
+class SyntheticCamera:
+    def __init__(self, frame: NDArray[np.uint8]) -> None:
+        self.frame: NDArray[np.uint8] | None = frame
+
+    def read(self) -> tuple[bool, NDArray[np.uint8] | None]:
+        frame, self.frame = self.frame, None
+        return frame is not None, frame
+
+    def release(self) -> None:
+        pass
+
+
+image = np.full((1080, 1920, 3), 255, dtype=np.uint8)
+cv2.circle(image, (960, 540), 15, (0, 0, 0), -1)
+w.cap = SyntheticCamera(image)
+w.tick()
+assert w.bead is not None and np.allclose(w.bead[:2], [960, 540], atol=1)
+assert w.kf.initialized and np.all(np.isfinite(w.state_pos_mm))
+w.tick()
+assert w.frame is None and w.bead is None
+w.close_camera()
 
 # 蓝色磁场箭头与红色受力箭头均能绘制
 canvas = np.zeros((160, 240, 3), np.uint8)
@@ -278,4 +339,30 @@ w.on_video_mouse(570, 560, RIGHT)
 print("鼠标绘制路径点数:", len(w.path_px))
 assert len(w.path_px) > 0
 
+# 手动实时模式和诊断切换仍正确停止 MPC worker。
+w.frame = None
+w.frame_size = (1920, 1080)
+w.bead = (800, 540, 300)
+w.state_pos_mm = np.array(w.px_to_world_mm(w.bead[:2]))
+w.make_rect()
+w.start_tracking()
+manual_shared = w.shared
+w.chk_force_live.setChecked(True)
+assert not w.tracking and w.worker is None and manual_shared.stopped()
+w.chk_force_live.setChecked(False)
+w.start_tracking()
+w.toggle_dir_test(True)
+assert not w.tracking and w.worker is None and w.dir_test_on
+w.toggle_dir_test(False)
+w.start_tracking()
+w.toggle_calib(True)
+assert not w.tracking and w.worker is None and w.calib_active
+w.toggle_calib(False)
+w.start_coil_scan()
+assert w.coil_test_idx == 0 and not w.tracking and w.worker is None
+w.normal_stop()
+assert w.coil_test_idx is None
+w.close()
+assert serial_sink.closed
+settings_dir.cleanup()
 print("SMOKE OK")

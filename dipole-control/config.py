@@ -55,15 +55,13 @@ DIPOLES_PER_COIL = 30
 N_COILS = 6
 TOTAL_DIPOLES = N_COILS * DIPOLES_PER_COIL          # 180
 
-# ---------- PID 默认值（X/Y 独立，输出为磁力 µN/mm 系） ----------
+# ---------- 仿真器保留的历史 PID 默认值（实机 GUI 不再使用） ----------
 PID = {
     "Kpx": 20.0, "Kix": 2.0, "Kdx": 5.0,
     "Kpy": 20.0, "Kiy": 2.0, "Kdy": 5.0,
 }
 PID_FMAX_UN = 100.0           # 期望磁力范数限幅 (µN)
-PID_DEADZONE_MM = 0.05        # 位置死区 (mm)
-PID_IMAX = 100.0              # 积分限幅（mm·s）
-VEL_LPF_ALPHA = 0.6           # 微分项速度 EMA 滤波系数（新值权重）
+VEL_LPF_ALPHA = 0.6           # RAW/EMA 状态估计的速度滤波系数（新值权重）
 
 # ---------- 摩擦 / 法向减摩 ----------
 RHO_BEAD = 7500.0             # 磁珠密度 (kg/m³)，N38 NdFeB
@@ -73,11 +71,8 @@ N_MIN_UN = 2.0                # 最小安全法向力 (µN)
 FZ_MAX_UN = 40.0              # 最大向上减摩力 (µN)，不做完全悬浮
 NORMAL_RATIO_DEFAULT = 0.4    # 目标法向力比例 N_target/W_eff
 FRICTION_V_EPS = 0.05         # 摩擦平滑速度阈值 (mm/s)
-MU_STATIC_DEFAULT = 0.25      # 静摩擦系数（未标定占位，可实验标定）
-MU_DYNAMIC_DEFAULT = 0.15     # 动摩擦系数（未标定占位）
 
-# ---------- 速度前馈 / 路径 ----------
-KV_DEFAULT = 1.0              # 速度前馈增益
+# ---------- 路径 ----------
 PATH_SPEED_MM_S = 1.0         # 路径跟踪期望速度 (mm/s)
 PATH_DS_MM = 0.15             # 路径弧长重采样间距 (mm)
 
@@ -94,9 +89,6 @@ KALMAN_R = 0.005              # 观测噪声方差 (mm²)，对应 ~0.07mm 视�
 # ---------- 执行器动态（仅估计，无电流传感器） ----------
 L_COIL_H = 0.273              # 线圈电感 (H)
 R_COIL_OHM = 12.0             # 线圈电阻 (Ω)
-
-# ---------- 磁力总限幅 ----------
-FTOTAL_MAX_UN = 600.0         # 三维磁力总幅值上限 (µN)
 
 # ---------- 多速率控制架构 ----------
 VISION_HZ = 30.0              # 视觉检测

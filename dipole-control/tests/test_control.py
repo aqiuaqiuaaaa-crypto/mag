@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-控制模块单元测试（摩擦/减摩/前馈/ESO/Kalman/方向）
+共享控制模块单元测试（摩擦/减摩/阻力/ESO/Kalman/方向）
 ==================================================
 独立运行：py tests/test_control.py（也兼容 pytest）
 """
@@ -17,7 +17,7 @@ from dipole_solver import DipoleSolver
 from estimators import KalmanFilter2D, ESO1D
 import friction_model as fm
 
-RESULTS = []
+RESULTS: list[tuple[str, bool, str]] = []
 
 
 def test(fn):
@@ -76,20 +76,6 @@ def test_drag():
     c = S.drag_uN_per_mm_s(1000.0)
     assert abs(c - 6 * math.pi * 1.0 * 0.5e-3 * 1e3) < 1e-6
     assert abs(c - 9.42) < 0.01
-    # 前馈+反馈合并不重复：F_drag = c(Kv·v_des − v)，v=v_des,Kv=1 时应为 0
-    v_des, v = 1.0, 1.0
-    assert abs(c * (1.0 * v_des - v)) < 1e-12
-
-
-@test
-def test_feedforward():
-    # v_des↑ → F_ff = Kv·c·v_des 线性增大
-    c = S.drag_uN_per_mm_s(1000.0)
-    kv = 1.0
-    f1 = kv * c * 0.5
-    f2 = kv * c * 2.0
-    assert f2 == 4 * f1
-    assert abs(f2 - c * 2.0) < 1e-12     # Kv=1 时恰为完整斯托克斯前馈
 
 
 @test
@@ -161,9 +147,9 @@ if __name__ == "__main__":
     print("控制模块单元测试")
     print("=" * 64)
     for fn in [test_friction_model, test_lift_effect, test_drag,
-               test_feedforward, test_eso, test_kalman, test_force_direction]:
+               test_eso, test_kalman, test_force_direction]:
         fn()
-    n_fail = sum(1 for _, ok, _ in RESULTS if not ok)
+    n_fail = sum(not ok for _, ok, _ in RESULTS)
     print("-" * 64)
     print(f"总计 {len(RESULTS)} 项, 通过 {len(RESULTS) - n_fail}, 失败 {n_fail}")
     sys.exit(1 if n_fail else 0)

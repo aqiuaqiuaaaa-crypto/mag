@@ -2,13 +2,12 @@
 """
 基于 180 磁偶极子标定模型的视觉闭环磁控程序
 =============================================================================
-控制链（AUTO_TRACK，每帧严格按此顺序，见 tick()）：
-    相机 → 磁珠检测 → Kalman/EMA 状态估计 → 路径目标与目标速度
-    → 实机简易 PD（或高级 PID/MPC）→ 可选前馈/ESO/减摩
-    → 单线圈视觉扫描得到的模型坐标→相机坐标校正
-    → Fz 减摩控制器 → F_cmd=[Fx,Fy,Fz] → 磁力安全限幅
-    → 180 偶极子生成 [B;F]=A·I → Moore–Penrose 伪逆（运行时电流上限）
-    → 整数指令 → 按最终发送电流重算 F_actual → STM32 → CSV → GUI
+自动轨迹控制链（唯一控制器 MPC）：
+    相机 → 磁珠检测 → Kalman/EMA/RAW 状态估计与 ESO 扰动估计
+    → 路径参考 → SharedState → ControlWorker / ForceMPC（10Hz）
+    → 180 偶极子 [B;F]=A·I 伪逆（目标场、坐标标定、Fz 减摩）
+    → CurrentExecutor（30Hz，插值/斜率/整数化/估计电流）
+    → send_commands() → STM32；MPC CSV 与 GUI 显示
 
 力学与摩擦模型见 friction_model.py，状态估计见 estimators.py，
 电流逆解见 dipole_solver.py（本次未改动其核心算法）。
@@ -49,6 +48,7 @@ import friction_model as fm
 SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                              "gui_settings.json")
 
+# 历史公共 CSV 表头保留作为旧数据格式说明；主 GUI 仅导出 MPC 日志。
 CSV_HEADER = [
     "timestamp", "x", "y", "vx", "vy", "xd", "yd", "vxd", "vyd", "ex", "ey",
     "Fx_pid", "Fy_pid", "Fx_ff", "Fy_ff", "Fx_drag", "Fy_drag",
@@ -201,9 +201,14 @@ class VideoLabel(QLabel):
 
 
 class MagneticDipoleControl(QMainWindow):
+    spin_mpc_w_pos: QDoubleSpinBox
+    spin_mpc_w_vel: QDoubleSpinBox
+    spin_mpc_w_u: QDoubleSpinBox
+    spin_mpc_w_du: QDoubleSpinBox
+
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("180 磁偶极子磁力解算 PID 磁控系统")
+        self.setWindowTitle("180 磁偶极子磁力解算 MPC 磁控系统")
         available = QApplication.primaryScreen().availableGeometry()
         self.resize(min(1520, int(available.width() * 0.96)),
                     min(820, int(available.height() * 0.92)))
@@ -229,7 +234,7 @@ class MagneticDipoleControl(QMainWindow):
         # ---------- 状态估计 ----------
         self.kf = KalmanFilter2D(cfg.KALMAN_Q_POS, cfg.KALMAN_Q_VEL, cfg.KALMAN_R)
         self.ema_vel = np.zeros(2)
-        self.state_pos_mm = np.zeros(2)     # 估计器输出（供 PID/ESO）
+        self.state_pos_mm = np.zeros(2)     # 估计器输出（供 MPC/ESO）
         self.state_vel_mm = np.zeros(2)
         self.last_pos_mm = None
 
@@ -239,7 +244,6 @@ class MagneticDipoleControl(QMainWindow):
         self.last_F_actual = np.zeros(3)    # 上一帧实际磁力（ESO 输入 u）
         self.current_B_T = np.zeros(3)      # 当前位置、最终指令电流对应的模型磁场
         self.current_F_N = np.zeros(3)      # 当前位置、最终指令电流对应的模型磁力
-        self.est_current = np.zeros(6)      # 执行器模型估计电流（非测量值）
         self.z3 = np.zeros(2)
 
         # ---------- 路径与追踪 ----------
@@ -254,13 +258,10 @@ class MagneticDipoleControl(QMainWindow):
 
         # ---------- 控制状态 ----------
         self.last_time = time.time()
-        self.integral = np.zeros(2)
         self.last_sent_cmd = [0] * 6
         self.man_currents = [0] * 6
         self.stopping = False
         self.last_solver_rec = None
-        self.exp_log = []
-        self.log_t0 = None
         self.cycle_over_cnt = 0
         # 多速率架构：10Hz MPC/MDM 工作线程 + 30Hz 电流执行层
         self.shared = SharedState()
@@ -271,7 +272,6 @@ class MagneticDipoleControl(QMainWindow):
         self.exp_log_mpc = []          # 10Hz MPC/MDM 日志（工作线程写入）
         self.last_diag = None
         self.mpc_meas_hz = 0.0
-        self.active_controller = "PID"
         self.vision_ms = 0.0
         self.estimator_ms = 0.0
         self.controller_ms = 0.0
@@ -509,7 +509,7 @@ class MagneticDipoleControl(QMainWindow):
             self.cur_sliders.append(s)
             self.cur_spins.append(sp)
         v.addWidget(box)
-        note = QLabel("实时发送、力解算、PID/MPC 均经过顶部“电流上限”和统一安全层；\n"
+        note = QLabel("实时发送、力解算、MPC 均经过顶部“电流上限”和统一安全层；\n"
                       "斜率限制为 9 指令/帧（降低上限时安全限幅优先）。")
         note.setWordWrap(True)
         v.addWidget(note)
@@ -542,7 +542,6 @@ class MagneticDipoleControl(QMainWindow):
         self.btn_dir_test.setChecked(False)
         self.btn_calib.setChecked(False)
         self.chk_force_live.setChecked(False)
-        self.combo_controller.setEnabled(True)
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
@@ -557,7 +556,6 @@ class MagneticDipoleControl(QMainWindow):
         self.stopping = False
         self.btn_dir_test.setChecked(False)
         self.btn_calib.setChecked(False)
-        self.combo_controller.setEnabled(True)
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
@@ -648,7 +646,7 @@ class MagneticDipoleControl(QMainWindow):
     def _solve_motion_target(self, pos_m, force_N):
         """按文献构造 [B;F]=A·I，并用 Moore–Penrose 伪逆求电流。
 
-        路径/PID 使用相机世界坐标；逆解前通过单线圈视觉扫描得到的正交映射
+        路径与手动磁力使用相机世界坐标；逆解前通过单线圈视觉扫描得到的正交映射
         转回模型坐标。这样保留多偶极子物理模型，同时修正安装和相机坐标差异。
         """
         requested_camera = np.asarray(force_N, float).copy()
@@ -887,10 +885,6 @@ class MagneticDipoleControl(QMainWindow):
         fg.addWidget(QLabel("重采样间距(mm)"), 1, 0)
         self.spin_path_ds = self._dspin(0.05, 1.0, cfg.PATH_DS_MM, 0.05, 2)
         fg.addWidget(self.spin_path_ds, 1, 1)
-        fg.addWidget(QLabel("速度前馈增益 Kv"), 2, 0)
-        self.spin_kv = self._dspin(0.0, 3.0, cfg.KV_DEFAULT, 0.1)
-        self.spin_kv.setToolTip("F_ff = Kv·c·v_des；0 = 关闭速度前馈")
-        fg.addWidget(self.spin_kv, 2, 1)
         v.addWidget(ff_box)
 
         bf_box = QGroupBox("文献法 [B;F]=A·I 驱动目标（Moore–Penrose 伪逆）")
@@ -918,32 +912,6 @@ class MagneticDipoleControl(QMainWindow):
         bg.addWidget(self.lbl_field_target, 2, 0, 1, 2)
         v.addWidget(bf_box)
         self._update_field_target_label()
-
-        pid_box = QGroupBox("PID X/Y 独立（每行依次 Kp, Ki, Kd；Kd 作用于速度误差 "
-                            "v_des−v；单位 µN/mm、µN/(mm·s)、µN/(mm/s)）")
-        pg = QGridLayout(pid_box)
-        defaults = dict(cfg.PID)
-        pg.addWidget(QLabel("X:"), 0, 0)
-        pg.addWidget(QLabel("Y:"), 1, 0)
-        self.pid_spins = {}
-        for col, stem in enumerate(["Kp", "Ki", "Kd"]):
-            pg.addWidget(QLabel(stem), 0, col * 2 + 1)
-            for r, ax in enumerate(["x", "y"]):
-                sp = self._dspin(0, 1000, defaults[f"{stem}{ax}"],
-                                 1.0 if stem == "Kp" else 0.5)
-                sp.setFixedWidth(80)
-                sp.setToolTip(f"{stem}{ax}")
-                self.pid_spins[f"{stem}{ax}"] = sp
-                pg.addWidget(sp, r, col * 2 + 2)
-        pg.addWidget(QLabel("死区(mm)"), 2, 0)
-        self.spin_deadzone = self._dspin(0.0, 5.0, cfg.PID_DEADZONE_MM, 0.05)
-        self.spin_deadzone.setFixedWidth(80)
-        pg.addWidget(self.spin_deadzone, 2, 1)
-        pg.addWidget(QLabel("Fxy限幅(µN)"), 2, 2)
-        self.spin_fmax = self._dspin(1, 2000, cfg.PID_FMAX_UN, 10.0, 1)
-        self.spin_fmax.setFixedWidth(80)
-        pg.addWidget(self.spin_fmax, 2, 3)
-        v.addWidget(pid_box)
 
         mpc_box = QGroupBox("MPC 参数（运行中修改，下一次 10 Hz 周期生效）")
         mg = QGridLayout(mpc_box)
@@ -994,15 +962,7 @@ class MagneticDipoleControl(QMainWindow):
         self.combo_constraint.setCurrentIndex(0)
         pg2.addWidget(self.combo_constraint, 0, 1)
         pg2.addWidget(QLabel("控制器"), 1, 0)
-        self.combo_controller = QComboBox()
-        self.combo_controller.addItems(["实机简易闭环 (推荐)", "PID (30 Hz 高级)",
-                                        "MPC (10 Hz 多速率)"])
-        self.combo_controller.setCurrentIndex(0)
-        self.combo_controller.setToolTip(
-            "实机简易闭环：视觉位置/速度反馈 → PD 力目标 → 坐标标定 → MDM 电流逆解；\n"
-            "MPC：10Hz 滚动时域（Kalman 状态 → 目标力 → MDM 逆解），\n"
-            "30Hz 电流执行层做目标插值+斜率限幅+RL 线圈估计")
-        pg2.addWidget(self.combo_controller, 1, 1)
+        pg2.addWidget(QLabel("MPC (10 Hz 多速率)"), 1, 1)
         v.addLayout(pg2)
         v.addStretch(1)
         return w
@@ -1048,15 +1008,6 @@ class MagneticDipoleControl(QMainWindow):
         fg.addWidget(QLabel("最小安全法向力 N_min (µN)"), 3, 0)
         self.spin_n_min = self._dspin(0.0, 50.0, cfg.N_MIN_UN, 1.0, 1)
         fg.addWidget(self.spin_n_min, 3, 1)
-        self.chk_fric_comp = QCheckBox("启用摩擦前馈补偿（建议先标定摩擦系数）")
-        self.chk_fric_comp.setChecked(False)
-        fg.addWidget(self.chk_fric_comp, 4, 0, 1, 2)
-        fg.addWidget(QLabel("静摩擦系数 μ_s"), 5, 0)
-        self.spin_mu_s = self._dspin(0.0, 2.0, cfg.MU_STATIC_DEFAULT, 0.05)
-        fg.addWidget(self.spin_mu_s, 5, 1)
-        fg.addWidget(QLabel("动摩擦系数 μ_d"), 6, 0)
-        self.spin_mu_d = self._dspin(0.0, 2.0, cfg.MU_DYNAMIC_DEFAULT, 0.05)
-        fg.addWidget(self.spin_mu_d, 6, 1)
         v.addWidget(fz_box)
 
         eso_box = QGroupBox("ESO 扰动观测器（动力学：c·v = F + d，b0 = 1/c）")
@@ -1094,14 +1045,6 @@ class MagneticDipoleControl(QMainWindow):
         kg.addWidget(self.spin_r_meas, 3, 1)
         v.addWidget(kal_box)
 
-        exec_box = QGroupBox("执行器动态（估计值，无电流传感器）")
-        xg = QGridLayout(exec_box)
-        self.chk_exec = QCheckBox("启用一阶电流动态估计 τ=L/R≈22.8ms（ESO 输入用估计电流）")
-        self.chk_exec.setChecked(False)
-        xg.addWidget(self.chk_exec, 0, 0, 1, 2)
-        xg.addWidget(QLabel(f"L={cfg.L_COIL_H*1e3:.0f} mH, R={cfg.R_COIL_OHM:.0f} Ω"))
-        v.addWidget(exec_box)
-
         self.lbl_adv = QLabel("")
         self.lbl_adv.setStyleSheet("font-family: Consolas;")
         v.addWidget(self.lbl_adv)
@@ -1113,7 +1056,7 @@ class MagneticDipoleControl(QMainWindow):
         w = QWidget()
         v = QVBoxLayout(w)
 
-        dir_box = QGroupBox("方向测试（恒定测试力，检验逆解/摩擦/PID 归属）")
+        dir_box = QGroupBox("方向测试（恒定测试力，检验逆解/摩擦/自动控制归属）")
         dg = QGridLayout(dir_box)
         dg.addWidget(QLabel("F_test_x (µN)"), 0, 0)
         self.spin_ftx = self._dspin(-300, 300, 30.0, 5.0)
@@ -1584,13 +1527,6 @@ class MagneticDipoleControl(QMainWindow):
         self.last_sent_cmd = list(cmd)
         self._update_local_field_force()
         self.serial_ms = (time.perf_counter() - t0) * 1e3
-        # 执行器一阶动态估计（估计电流，非测量值；τ = L/R ≈ 22.8ms）
-        if self.chk_exec.isChecked():
-            a = math.exp(-cfg.TICK_MS * 1e-3 / (cfg.L_COIL_H / cfg.R_COIL_OHM))
-            self.est_current = [a * e + (1 - a) * c
-                                for e, c in zip(self.est_current, cmd)]
-        else:
-            self.est_current = list(cmd)
 
     def _update_local_field_force(self):
         """按当前位置与最终整数指令，更新用于状态栏和画面箭头的 B/F 模型值。"""
@@ -1623,9 +1559,7 @@ class MagneticDipoleControl(QMainWindow):
         self.btn_calib.setChecked(False)
         self.chk_cur_live.setChecked(False)
         self.chk_force_live.setChecked(False)
-        self.integral = np.zeros(2)
         self.mode = "STOPPING"
-        self.combo_controller.setEnabled(True)
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
@@ -1638,7 +1572,6 @@ class MagneticDipoleControl(QMainWindow):
         self.btn_calib.setChecked(False)
         self.chk_cur_live.setChecked(False)
         self.chk_force_live.setChecked(False)
-        self.integral = np.zeros(2)
         if self.ser:
             try:
                 self.ser.write(b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n")
@@ -1646,7 +1579,6 @@ class MagneticDipoleControl(QMainWindow):
                 pass
         self.last_sent_cmd = [0] * 6
         self.mode = "IDLE"
-        self.combo_controller.setEnabled(True)
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
@@ -1779,12 +1711,9 @@ class MagneticDipoleControl(QMainWindow):
         lead = [tuple(p0 + (p1 - p0) * i / n) for i in range(n)]
         self.full_path = lead + list(self.path_px)
         self.target_idx = 0
-        self.integral = np.zeros(2)
         self.traj_px = []
         self.traj_mm = []
-        self.exp_log = []
         self.exp_log_mpc = []
-        self.log_t0 = time.time()
         self.last_time = time.time()
         self.tracking = True
         self.stopping = False
@@ -1797,33 +1726,26 @@ class MagneticDipoleControl(QMainWindow):
         self.coil_test_idx = None
         self.btn_dir_test.setChecked(False)
         self.btn_calib.setChecked(False)
-        controller_text = self.combo_controller.currentText()
-        self.active_controller = ("MPC" if controller_text.startswith("MPC") else
-                                  "SIMPLE" if controller_text.startswith("实机") else
-                                  "PID")
         # 目标力与 10mT 场幅值联合优化，运动期间固定使用 6 路自由模式。
         self.combo_constraint.setCurrentIndex(0)
         self.combo_constraint.setEnabled(False)
-        self.combo_controller.setEnabled(False)
         # 多速率模式：发布参考路径（世界系）并启动 10Hz MPC/MDM 工作线程
         self._stop_worker()
-        if self.active_controller == "MPC":
-            # stop() 后的 Event 不能复用；每次启动建立一份干净的共享状态。
-            self.shared = SharedState()
-            self.shared.set_reference(
-                [np.array(self.px_to_world_mm(p)) for p in self.full_path],
-                self.spin_path_speed.value(), time.time())
-            self.shared.set_kalman(self.state_pos_mm, self.state_vel_mm, time.time())
-            self.shared.set_last_sent(self.last_sent_cmd)
-            self._publish_mpc_params(time.time())
-            self.shared.set_solver_error(None)
-            self.executor = CurrentExecutor()
-            self.worker = ControlWorker(self.shared, self.solver)
-            self.worker.start()
+        # stop() 后的 Event 不能复用；每次启动建立一份干净的共享状态。
+        self.shared = SharedState()
+        self.shared.set_reference(
+            [np.array(self.px_to_world_mm(p)) for p in self.full_path],
+            self.spin_path_speed.value(), time.time())
+        self.shared.set_kalman(self.state_pos_mm, self.state_vel_mm, time.time())
+        self.shared.set_last_sent(self.last_sent_cmd)
+        self._publish_mpc_params(time.time())
+        self.shared.set_solver_error(None)
+        self.executor = CurrentExecutor()
+        self.worker = ControlWorker(self.shared, self.solver)
+        self.worker.start()
 
     def _reset_controllers(self):
-        """模式切换/启动时复位 ESO 与积分（KF 保持连续）"""
-        self.integral = np.zeros(2)
+        """模式切换/启动时复位 ESO（KF 保持连续）"""
         c = self._drag_c_uN()
         self.eso_x = ESO1D(1.0 / c, self.spin_omega0.value(),
                            self.spin_fal_delta.value(),
@@ -1833,30 +1755,22 @@ class MagneticDipoleControl(QMainWindow):
                            self.spin_dist_limit.value())
         self.z3 = np.zeros(2)
 
-    def save_traj(self):
-        if not self.exp_log and not self.exp_log_mpc:
+    def save_traj(self) -> None:
+        if not self.exp_log_mpc:
             QMessageBox.information(self, "保存", "实验日志为空（请先运行自动追踪）")
             return
-        fn, _ = QFileDialog.getSaveFileName(self, "保存实验CSV", "experiment.csv",
-                                            "CSV (*.csv)")
+        fn, _ = QFileDialog.getSaveFileName(self, "保存 MPC 实验CSV",
+                                           "experiment_mpc10hz.csv", "CSV (*.csv)")
         if not fn:
             return
         with open(fn, "w", encoding="utf-8", newline="") as f:
-            f.write(",".join(CSV_HEADER) + "\n")
-            for row in self.exp_log:
+            f.write("timestamp,mpc_ms,solver_ms,mpc_cost,ref_x,ref_y,"
+                    "vref_x,vref_y,Fx_target,Fy_target,force_error,converged,"
+                    "horizon,W_pos,W_vel,W_u,W_du,Fmax,a0_cmd,a1_cmd,a2_cmd,"
+                    "a3_cmd,a4_cmd,a5_cmd\n")
+            for row in self.exp_log_mpc:
                 f.write(",".join(str(x) for x in row) + "\n")
-        # 10Hz MPC/MDM 日志另存一份
-        if self.exp_log_mpc:
-            fn2 = fn.rsplit(".", 1)[0] + "_mpc10hz.csv"
-            with open(fn2, "w", encoding="utf-8", newline="") as f:
-                f.write("timestamp,mpc_ms,solver_ms,mpc_cost,ref_x,ref_y,"
-                        "vref_x,vref_y,Fx_target,Fy_target,force_error,converged,"
-                        "horizon,W_pos,W_vel,W_u,W_du,Fmax,a0_cmd,a1_cmd,a2_cmd,"
-                        "a3_cmd,a4_cmd,a5_cmd\n")
-                for row in self.exp_log_mpc:
-                    f.write(",".join(str(x) for x in row) + "\n")
-        QMessageBox.information(self, "保存", f"已保存 {len(self.exp_log)} 行 30Hz 日志"
-                                + ("（含 MPC 10Hz 日志）" if self.exp_log_mpc else ""))
+        QMessageBox.information(self, "保存", f"已保存 {len(self.exp_log_mpc)} 行 MPC 10Hz 日志")
 
     # ================= 诊断模式 =================
     def toggle_dir_test(self, on):
@@ -1871,7 +1785,6 @@ class MagneticDipoleControl(QMainWindow):
             self.calib_active = False
             self.coil_test_idx = None
             self.btn_calib.setChecked(False)
-            self.combo_controller.setEnabled(True)
             self.combo_constraint.setEnabled(True)
             self._stop_worker()
             self._reset_controllers()
@@ -1888,7 +1801,6 @@ class MagneticDipoleControl(QMainWindow):
             self.dir_test_on = False
             self.coil_test_idx = None
             self.btn_dir_test.setChecked(False)
-            self.combo_controller.setEnabled(True)
             self.combo_constraint.setEnabled(True)
             self._stop_worker()
             try:
@@ -1945,7 +1857,6 @@ class MagneticDipoleControl(QMainWindow):
         self.calib_active = False
         self.btn_dir_test.setChecked(False)
         self.btn_calib.setChecked(False)
-        self.combo_controller.setEnabled(True)
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
         self.mode = "COIL_TEST"
@@ -2031,7 +1942,6 @@ class MagneticDipoleControl(QMainWindow):
 
         # 4-17. 控制分支
         t2 = time.perf_counter()
-        log_rows_before = len(self.exp_log)
         if self.stopping:
             if any(c != 0 for c in self.last_sent_cmd):
                 self.send_commands([0] * 6)
@@ -2064,12 +1974,6 @@ class MagneticDipoleControl(QMainWindow):
 
         total = (time.perf_counter() - t_cycle) * 1e3
         self.total_ms = total
-        # control_step 内写日志时，本帧计时尚未结束；在这里回填本帧的真实值。
-        if len(self.exp_log) > log_rows_before:
-            row = self.exp_log[-1]
-            row[CSV_HEADER.index("controller_time_ms")] = round(self.controller_ms, 3)
-            row[CSV_HEADER.index("total_cycle_time_ms")] = round(self.total_ms, 3)
-            row[CSV_HEADER.index("loop_jitter_ms")] = round(self.loop_jitter_ms, 3)
         self.cycle_over_cnt = self.cycle_over_cnt + 1 \
             if total > 1000.0 / cfg.CONTROL_HZ else 0
 
@@ -2217,208 +2121,9 @@ class MagneticDipoleControl(QMainWindow):
         self.mode = "STOPPING"
 
     # ================= 自动追踪控制器 =================
-    def control_step(self, dt):
-        if self.active_controller == "MPC":
-            self.mpc_track_step(dt)
-            return
-        if not detected_flag(self):
-            if self.lost_since is None:
-                self.lost_since = time.time()
-            elif time.time() - self.lost_since > 1.0:
-                self.normal_stop()
-            return
-        self.lost_since = None
-
-        max_active = self.n_coils_total
-
-        pos = self.state_pos_mm
-        vel = self.state_vel_mm
-
-        # 路径目标 + 目标速度（切向）
-        while self.target_idx < len(self.full_path):
-            t_mm = np.array(self.px_to_world_mm(self.full_path[self.target_idx]))
-            if np.linalg.norm(t_mm - pos) >= self.spin_tol_default():
-                break
-            self.target_idx += 1
-        if self.target_idx >= len(self.full_path):
-            self.normal_stop()
-            return
-        t_mm = np.array(self.px_to_world_mm(self.full_path[self.target_idx]))
-        i2 = min(self.target_idx + 1, len(self.full_path) - 1)
-        d_px = np.array(self.full_path[i2]) - np.array(self.full_path[self.target_idx])
-        d_world = np.array([d_px[0] * self.mm_per_px(), -d_px[1] * self.mm_per_px()])
-        nd = np.linalg.norm(d_world)
-        v_des = (self.spin_path_speed.value() * d_world / nd
-                 if nd > 1e-9 else np.zeros(2))
-
-        e_raw = t_mm - pos
-        e = e_raw if np.linalg.norm(e_raw) >= self.spin_deadzone.value() \
-            else np.zeros(2)
-
-        # 实机简易模式使用 PD；高级 PID 才启用积分及下方的模型补偿项。
-        simple_mode = self.active_controller == "SIMPLE"
-        kp = (self.pid_spins["Kpx"].value(), self.pid_spins["Kpy"].value())
-        ki = ((0.0, 0.0) if simple_mode else
-              (self.pid_spins["Kix"].value(), self.pid_spins["Kiy"].value()))
-        kd = (self.pid_spins["Kdx"].value(), self.pid_spins["Kdy"].value())
-        # 在默认 50 指令上限和 10mT 场幅值目标同时存在时，过大的水平力通常不可达。
-        # 简易模式先限制在 25µN；高级模式仍完全尊重用户的 Fxy 设置。
-        fmax = min(self.spin_fmax.value(), 25.0) if simple_mode else self.spin_fmax.value()
-        F_pid = np.zeros(2)
-        new_int = np.zeros(2) if simple_mode else self.integral.copy()
-        for a, ex in enumerate(e):
-            ix_try = 0.0 if simple_mode else self.integral[a] + ex * dt
-            f_try = kp[a] * ex + ki[a] * ix_try + kd[a] * (v_des[a] - vel[a])
-            f_old = kp[a] * ex + ki[a] * self.integral[a] + kd[a] * (v_des[a] - vel[a])
-            # 输出饱和且积分继续加深 → 暂停积分（conditional integration）
-            if not (abs(f_try) > fmax and abs(f_try) > abs(f_old) and
-                    np.sign(ex) == np.sign(f_try)):
-                new_int[a] = ix_try
-            F_pid[a] = kp[a] * ex + ki[a] * new_int[a] + kd[a] * (v_des[a] - vel[a])
-        self.integral = np.clip(new_int, -cfg.PID_IMAX, cfg.PID_IMAX)
-        fn = np.linalg.norm(F_pid)
-        if fn > fmax:
-            F_pid *= fmax / fn
-
-        # 流体阻力补偿 + 速度前馈（简易模式关闭，减少未标定物理量影响）
-        c_drag = self._drag_c_uN()
-        kv = self.spin_kv.value()
-        F_ff = np.zeros(2) if simple_mode else kv * c_drag * v_des
-        F_drag = np.zeros(2) if simple_mode else F_ff - c_drag * vel
-
-        # 摩擦补偿（沿期望方向，幅值随 Fz 减摩后的 N 变化）
-        w_eff = fm.effective_weight_uN(self.spin_rho_b.value(),
-                                       self.spin_rho_f.value(),
-                                       self.spin_beadD.value() * 0.5e-3)
-        if self.chk_lift.isChecked() and not simple_mode:
-            Fz_lift = fm.lift_force_uN(w_eff, self.spin_normal_ratio.value(),
-                                       self.spin_fz_max.value(),
-                                       self.spin_n_min.value())
-        else:
-            Fz_lift = 0.0
-        N_est = fm.normal_force_uN(w_eff, Fz_lift, self.spin_n_min.value())
-        if self.chk_fric_comp.isChecked() and not simple_mode:
-            F_fric = np.array(fm.friction_comp_uN(
-                v_des[0], v_des[1], N_est,
-                self.spin_mu_s.value(), self.spin_mu_d.value(),
-                cfg.FRICTION_V_EPS)[:2])
-        else:
-            F_fric = np.zeros(2)
-        mu_eff_show = fm.mu_effective(np.linalg.norm(v_des),
-                                      self.spin_mu_s.value(),
-                                      self.spin_mu_d.value(),
-                                      cfg.FRICTION_V_EPS)
-
-        # ESO 扰动补偿（u 用上一帧实际磁力或执行器估计电流对应的力）
-        if self.chk_eso.isChecked() and not simple_mode:
-            if self.chk_exec.isChecked():
-                u_vec = self.solver.force_at(
-                    self._bead_pos_m(),
-                    np.asarray(self.est_current) * self.solver.current_gain)
-                u_vec = np.asarray(u_vec, float).copy()
-                u_vec[:2] = self.force_model_to_camera @ u_vec[:2]
-            else:
-                u_vec = self.last_F_actual
-            self.z3[0] = self.eso_x.step(dt, pos[0], u_vec[0] * 1e6)
-            self.z3[1] = self.eso_y.step(dt, pos[1], u_vec[1] * 1e6)
-            F_eso = -self.z3.copy()
-        else:
-            F_eso = np.zeros(2)
-
-        # Fxy 组装与限幅（F_drag 已含前馈 F_ff，不可再加一次）
-        F_xy = F_pid + F_drag + F_fric + F_eso
-        fn = np.linalg.norm(F_xy)
-        if fn > fmax:
-            F_xy *= fmax / fn
-        # Fz 安全限幅（向上为正，范围 [−Fz_max, +Fz_max]）
-        Fz_cmd = float(np.clip(Fz_lift if self.chk_lift.isChecked() and not simple_mode else 0.0,
-                               -self.spin_fz_max.value(), self.spin_fz_max.value()))
-        # 总磁力上限：超限先缩 Fxy，保 Fz 安全与路径方向
-        F_cmd = np.array([F_xy[0], F_xy[1], Fz_cmd])
-        ft = float(np.linalg.norm(F_cmd[:2])) ** 2
-        ft_total = math.hypot(np.linalg.norm(F_xy), Fz_cmd)
-        if ft_total > cfg.FTOTAL_MAX_UN:
-            allow = math.sqrt(max(cfg.FTOTAL_MAX_UN ** 2 - Fz_cmd ** 2, 0.0))
-            F_cmd[:2] = F_xy * (allow / max(np.linalg.norm(F_xy), 1e-9))
-        self.last_controller_F = {"pid": F_pid, "ff": F_ff, "drag": F_drag,
-                                  "fric": F_fric, "eso": F_eso,
-                                  "N": N_est, "mu": mu_eff_show,
-                                  "v_des": v_des, "e": e_raw, "t": t_mm,
-                                  "Fz_lift": Fz_lift}
-
-        # 电流逆解（含 Fz；约束在解算器内部）
-        pos_m = np.array([pos[0], pos[1], 0.0]) * 1e-3
-        try:
-            rec = self._solve_motion_target(pos_m, F_cmd * 1e-6)
-        except Exception as e:
-            # solver 异常 → 安全停止
-            print(f"solver 异常，安全停止: {e}")
-            self.normal_stop()
-            self.send_commands([0] * 6)
-            return
-        self.last_solver_rec = rec
-        self.last_F_actual = np.asarray(rec["achieved_force"], float).copy()
-        # 不可行帧（强制通道超名额）：solver 返回箱内过渡候选，但 PID 模式
-        # 不发它——保持斜率归零，直到进入严格可行域
-        if rec.get("sparse_infeasible", False):
-            self.send_commands([0] * 6)
-            return
-        self.send_commands([int(c) for c in rec["commands"]])
-
-        # 轨迹与 CSV
-        self.traj_px.append(tuple(self.bead[:2]))
-        self.traj_mm.append(tuple(pos))
-        # RL 估计电流 + MDM 正向模型诊断（所有模式每帧维护）
-        diag = self._diag_to_camera(self.executor.update_est(
-            dt, pos_m, self.solver, self.last_sent_cmd))
-        self.last_diag = diag
-        b_vec_mT = diag["B"] * 1e3
-        b_mag_mT = diag["Bmag_mT"]
-        grad_vec = diag["grad_absB"] * 1e3
-        I_A = np.asarray(rec["currents"], float)
-        F_act = rec["achieved_force"] * 1e6
-        th_d = math.degrees(math.atan2(F_cmd[1], F_cmd[0])) \
-            if abs(F_cmd[0]) + abs(F_cmd[1]) > 1e-9 else 0.0
-        th_a = math.degrees(math.atan2(F_act[1], F_act[0])) \
-            if abs(F_act[0]) + abs(F_act[1]) > 1e-9 else 0.0
-        th_err = (th_a - th_d + 180.0) % 360.0 - 180.0
-        row = [round(time.time() - self.log_t0, 4),
-               round(pos[0], 4), round(pos[1], 4),
-               round(vel[0], 4), round(vel[1], 4),
-               round(t_mm[0], 4), round(t_mm[1], 4),
-               round(v_des[0], 4), round(v_des[1], 4),
-               round(e_raw[0], 4), round(e_raw[1], 4),
-               round(F_pid[0], 3), round(F_pid[1], 3),
-               round(F_ff[0], 3), round(F_ff[1], 3),
-               round(F_drag[0] - F_ff[0], 3), round(F_drag[1] - F_ff[1], 3),
-               round(F_fric[0], 3), round(F_fric[1], 3),
-               round(Fz_lift, 3),
-               round(-self.z3[0], 3), round(-self.z3[1], 3),
-               round(F_cmd[0], 3), round(F_cmd[1], 3), round(Fz_cmd, 3),
-               round(F_act[0], 3), round(F_act[1], 3), round(F_act[2], 3),
-               *[int(c) for c in self.last_sent_cmd],
-               *[round(a, 5) for a in I_A],
-               *[round(x, 5) for x in self.executor.I_est],
-               *[round(x, 5) for x in b_vec_mT],
-               round(b_mag_mT, 5),
-               *[round(x, 5) for x in grad_vec],
-               round(self.executor.align_tau_ms, 3),
-               round(self.executor.align_ratio, 3),
-               round(float(np.abs(I_A).sum()), 5),
-               round(rec["force_error_percent"], 3),
-               round(th_err, 2),
-               round(N_est, 3),
-               round(mu_eff_show * N_est, 3),
-               f"{rec['objective']:.6e}",
-               round(rec["elapsed_ms"], 3),
-               "AUTO_TRACK_" + self.active_controller,
-               self.combo_mode.currentText(),
-               self.combo_estimator.currentText(),
-               int(self.bead is not None),
-               round(self.vision_ms, 3), round(self.estimator_ms, 3),
-               round(self.controller_ms, 3), round(self.serial_ms, 3),
-               round(self.total_ms, 3), round(self.loop_jitter_ms, 3)]
-        self.exp_log.append(row)
+    def control_step(self, dt: float) -> None:
+        """实机自动追踪的薄入口，唯一调用 MPC 多速率控制链。"""
+        self.mpc_track_step(dt)
 
     def spin_tol_default(self):
         return 0.5
@@ -2442,8 +2147,7 @@ class MagneticDipoleControl(QMainWindow):
             self.normal_stop()
             return
         now = time.time()
-        # MPC 分支不会经过 PID 下方的 ESO 更新代码，因此必须在这里用上一帧
-        # 实际执行器估计磁力更新 z3，再把最新扰动力发布给 10Hz MPC。
+        # 用上一帧实际执行器估计磁力更新 z3，再把最新扰动力发布给 10Hz MPC。
         if self.chk_eso.isChecked():
             u_xy_uN = np.asarray(self.last_F_actual[:2], float) * 1e6
             self.z3[0] = self.eso_x.step(dt, pos[0], u_xy_uN[0])
@@ -2494,7 +2198,7 @@ class MagneticDipoleControl(QMainWindow):
             "mpc_w_u": self.spin_mpc_w_u.value(),
             "mpc_w_du": self.spin_mpc_w_du.value(),
             "max_active": self.n_coils_total,
-            "mpc_on": self.tracking and self.active_controller == "MPC",
+            "mpc_on": self.tracking,
             "fz_lift": fz_lift,
             "eso_d": self.z3.copy() if self.chk_eso.isChecked() else np.zeros(2),
             "viscosity_mPas": self.viscosity_mPas,
@@ -2551,7 +2255,7 @@ class MagneticDipoleControl(QMainWindow):
             t = self.full_path[self.target_idx]
             cv2.circle(disp, (int(t[0] * sx), int(t[1] * sy)), 6, (0, 255, 255), 2)
         mpc_snapshot = None
-        if self.tracking and self.active_controller == "MPC":
+        if self.tracking:
             _, seq, _, mpc_snapshot = self.shared.get_I_target()
             if seq > 0:
                 ref_mm = np.asarray(mpc_snapshot.get("ref_target", np.zeros(2)), float)
@@ -2577,7 +2281,7 @@ class MagneticDipoleControl(QMainWindow):
                 self.spin_bmag.value() * 1e-3, (255, 0, 0), "B")
             self._draw_vector_arrow(
                 disp, center, self.current_F_N,
-                max(self.spin_fmax.value(), 1.0) * 1e-6, (0, 0, 255), "F act")
+                max(self.spin_mpc_fmax.value(), 1.0) * 1e-6, (0, 0, 255), "F act")
             if mpc_snapshot is not None:
                 f_target = np.asarray(
                     mpc_snapshot.get("F_target", np.zeros(2)), float)
@@ -2623,15 +2327,13 @@ class MagneticDipoleControl(QMainWindow):
             d = self.last_diag
             align_warn = " ⚠对齐慢" if d["ratio"] < cfg.ALIGNMENT_RATIO_MIN else ""
             low_warn = " ⚠低场" if d["low_field"] else ""
-            mpc_line = ""
-            if self.active_controller == "MPC":
-                _, seq, _, snap = self.shared.get_I_target()
-                f_target = np.asarray(snap.get("F_target", np.zeros(2)), float)
-                ref_target = np.asarray(snap.get("ref_target", np.zeros(2)), float)
-                mpc_line = (f"\nMPC#{seq}: F_target="
-                            f"[{f_target[0]:+.2f},{f_target[1]:+.2f}]µN | "
-                            f"ref=[{ref_target[0]:+.2f},{ref_target[1]:+.2f}]mm | "
-                            f"J={float(snap.get('mpc_cost', 0.0)):.3f}")
+            _, seq, _, snap = self.shared.get_I_target()
+            f_target = np.asarray(snap.get("F_target", np.zeros(2)), float)
+            ref_target = np.asarray(snap.get("ref_target", np.zeros(2)), float)
+            mpc_line = (f"\nMPC#{seq}: F_target="
+                        f"[{f_target[0]:+.2f},{f_target[1]:+.2f}]µN | "
+                        f"ref=[{ref_target[0]:+.2f},{ref_target[1]:+.2f}]mm | "
+                        f"J={float(snap.get('mpc_cost', 0.0)):.3f}")
             self.lbl_multirate.setText(
                 f"视觉/Kalman: {cfg.VISION_HZ:.0f}/{cfg.KALMAN_HZ:.0f} Hz | "
                 f"MPC/MDM: {cfg.MPC_HZ:.0f}/{cfg.SOLVER_HZ:.0f} Hz | "
@@ -2682,14 +2384,8 @@ class MagneticDipoleControl(QMainWindow):
             "circ_r": self.spin_circ_r, "rect_w": self.spin_rw,
             "rect_h": self.spin_rh, "tri_side": self.spin_tri,
             "path_speed": self.spin_path_speed, "path_ds": self.spin_path_ds,
-            "kv": self.spin_kv,
             "field_dir_x": self.spin_bdir_x, "field_dir_y": self.spin_bdir_y,
             "field_dir_z": self.spin_bdir_z, "field_magnitude_mT": self.spin_bmag,
-            "pid_Kpx": self.pid_spins["Kpx"], "pid_Kix": self.pid_spins["Kix"],
-            "pid_Kdx": self.pid_spins["Kdx"],
-            "pid_Kpy": self.pid_spins["Kpy"], "pid_Kiy": self.pid_spins["Kiy"],
-            "pid_Kdy": self.pid_spins["Kdy"],
-            "deadzone": self.spin_deadzone, "fmax": self.spin_fmax,
             "mpc_horizon": self.spin_mpc_horizon,
             "mpc_fmax": self.spin_mpc_fmax,
             "mpc_w_pos": self.spin_mpc_w_pos,
@@ -2697,7 +2393,6 @@ class MagneticDipoleControl(QMainWindow):
             "mpc_w_u": self.spin_mpc_w_u,
             "mpc_w_du": self.spin_mpc_w_du,
             "constraint_mode": self.combo_constraint,
-            "controller": self.combo_controller,
             "man_currents": list(self.cur_spins),
             "fx": self.spin_fx, "fy": self.spin_fy, "fz": self.spin_fz,
             "cur_live": self.chk_cur_live, "force_live": self.chk_force_live,
@@ -2707,14 +2402,11 @@ class MagneticDipoleControl(QMainWindow):
             "rho_bead": self.spin_rho_b, "rho_fluid": self.spin_rho_f,
             "lift_enable": self.chk_lift, "normal_ratio": self.spin_normal_ratio,
             "fz_max": self.spin_fz_max, "n_min": self.spin_n_min,
-            "fric_comp": self.chk_fric_comp,
-            "mu_s": self.spin_mu_s, "mu_d": self.spin_mu_d,
             "eso_enable": self.chk_eso, "eso_omega0": self.spin_omega0,
             "eso_delta": self.spin_fal_delta, "eso_limit": self.spin_dist_limit,
             "estimator": self.combo_estimator,
             "q_pos": self.spin_q_pos, "q_vel": self.spin_q_vel,
             "r_meas": self.spin_r_meas,
-            "exec_model": self.chk_exec,
             "calib_fz": self.edit_calib_fz, "calib_rate": self.spin_calib_rate,
             "calib_vth": self.spin_calib_vth,
         }
@@ -2785,9 +2477,6 @@ class MagneticDipoleControl(QMainWindow):
                 self._widget_set(item, val)
         if "constraint_mode" not in data and data.get("unipolar"):
             self.combo_constraint.setCurrentIndex(1)
-        # 从旧版本迁移时默认启用更安全、对未标定参数依赖更少的实机闭环。
-        if "current_max" not in data:
-            self.combo_controller.setCurrentIndex(0)
         try:
             R = np.asarray(data.get("force_model_to_camera", np.eye(2)), float)
             if R.shape == (2, 2) and np.all(np.isfinite(R)):
@@ -2814,13 +2503,6 @@ class MagneticDipoleControl(QMainWindow):
         if self.ser:
             self.ser.close()
         super().closeEvent(e)
-
-
-def detected_flag(win):
-    """追踪帧磁珠可见性判定"""
-    return win.bead is not None
-
-
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     win = MagneticDipoleControl()
