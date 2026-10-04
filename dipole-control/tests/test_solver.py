@@ -19,7 +19,7 @@ from dipole_solver import (DipoleSolver, ModelValidationError,
                            validate_model_data, MAX_CURRENT_A, CMD_MAX,
                            CMD_TO_A, MAX_DELTA_A, MAX_DELTA_CMD, CONV_TOL)
 
-RESULTS = []
+RESULTS: list[tuple[str, bool, str]] = []
 
 
 def test(fn):

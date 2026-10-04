@@ -20,9 +20,13 @@ import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 import cv2
+
+_serial: ModuleType | None
+list_ports: ModuleType | None
 
 try:
     import serial as _serial

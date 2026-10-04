@@ -2185,8 +2185,9 @@ def validate_against_comsol_reference(solver, ref_path=DEFAULT_COMSOL_PATH,
 
 if __name__ == "__main__":
     import sys
+    from collections.abc import Callable
 
-    TESTS = []
+    TESTS: list[tuple[str, Callable[[], None]]] = []
 
     def test(name):
         def deco(fn):

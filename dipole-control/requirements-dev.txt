@@ -1,0 +1,5 @@
+# Static checks only; runtime requirements.txt remains unchanged.
+mypy==2.4.0
+types-pyserial==3.5.0.20260712
+ruff==0.16.10
+black==26.5.1

@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bead_sim import (MagnetModel, FluidModel, FrictionModel, BeadSimulator,
                       G_ACC, MU0, V_EPS)
 
-RESULTS = []
+RESULTS: list[tuple[str, bool, str]] = []
 
 
 def test(fn):

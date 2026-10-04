@@ -20,7 +20,7 @@ from estimators import KalmanFilter2D
 from mpc import ForceMPC
 from multirate import SharedState, ControlWorker, CurrentExecutor
 
-RESULTS = []
+RESULTS: list[tuple[str, bool, str]] = []
 
 
 def test(fn):

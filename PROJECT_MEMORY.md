@@ -2,6 +2,14 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-04：上位机类型检查清零，未提交）
+
+- 本轮仅修复类型信息：原 7 个代码诊断与 2 个 pyserial 类型桩缺失诊断均已解决。全上位机 mypy 默认参数及 `--follow-imports=silent` 均为 19 source files / 0 error；没有全局 ignore_missing_imports 或新增 type: ignore。
+- 四处空列表注解与两个可选模块注解；原失败计数表达式、全部既有函数/类定义和控制行为保持。安装 `types-pyserial==3.5.0.20260712`，pyserial 仍为 3.5；新增 requirements-dev.txt，运行 requirements.txt 不变。
+- GUI smoke、MPC 专项 6、multirate 18、solver/protocol/safety 25、共享控制 6、CURT parser/GUI 132、仿真基础 8 均通过。ruff 仍有原有 104 个诊断；black 仍有原有 15 个需格式化文件，均无新增。
+- 当前 HEAD 仍为 `1e9303721c47530f6c9995859ac283f96f1cff5e`。遵守本轮要求，不自动 commit、不 push；下方“7 个类型问题和 2 个类型桩问题待处理”属于历史记录。
+- 完整检查与源码保护证据位于 `artifacts/type-check-20261004/`。真实硬件烧录、实测、CURT 电流标定及 PI 状态不变。
+
 ## 最新权威摘要（2026-10-04：CURT 已集成 MPC-only 主 GUI）
 
 - 正式实机自动轨迹控制仍为 **MPC-only**；RL / ES-MLP 已删除；独立仿真器及其 PID 保留。
@@ -667,3 +675,16 @@ LIVE = 新鲜且 valid/running=1、error_flags=0；超过 500 ms 没有完整 AD
 - 本轮复核：parser/CLI 105 项与 GUI 27 项，共 132 PASS；ADC 基础设施 16 PASS；固件 telemetry 集成保护 3 PASS。首次 pytest 因系统临时目录权限产生 fixture 错误，指定工作区 artifacts 内的独立临时目录后通过；没有因此修改源码或测试。
 - 主 GUI 与前置 MPC-only checkpoint 对比：105 个既有函数源码一致，仅初始化、UI、串口生命周期与退出清理四处包含此前完成的 CURT 接入。MPC、solver、multirate、Kalman、ESO、R-L current model 及发送函数保持。
 - 7 个既有 mypy 问题和 2 个 pyserial 类型桩问题留待后续，未修复、未安装类型桩。实板烧录、CURT 标定及电流 PI 仍未执行。
+
+
+# 上位机类型维护（2026-10-04）
+
+修改范围：`dipole_solver.py` 仅在 __main__ 自测区导入 Callable 并声明 TESTS 的 name/callback 二元组列表；`tests/test_solver.py`、`tests/test_multirate.py`、`tests/test_bead_sim.py` 仅声明 RESULTS 的 name/pass/error 三元组列表。三个 sum(1 for ... if not ok) 原文未改，列表元素类型明确后其重载推断错误同步消失。
+
+安装 typeshed 项目的 pyserial 类型桩后，原 try/except ImportError 的 _serial/list_ports = None 分支暴露两个 Module/None 赋值诊断。`magnetic_dipole_pid.py` 仅新增 ModuleType 导入与两个 ModuleType | None 模块级声明；保留完整导入分支、串口处理及所有 GUI 函数原文，没有宽泛 Any、ignore_missing_imports 或 type: ignore。
+
+使用 --no-deps 安装纯 .pyi 类型包 `types-pyserial==3.5.0.20260712`；其元数据明确针对 pyserial==3.5.*，无运行 .py 模块。pyserial 3.5 的 28 个源码文件 SHA-256 与安装前一致；numpy、OpenCV、PySide6 版本不变。mypy 2.4.0 / ruff 0.16.10 / black 26.5.1 与历史 QA 版本一致，仅安装到 artifacts 的隔离目录；新增 `dipole-control/requirements-dev.txt` 固定以上检查工具与类型桩，运行 requirements.txt 原字节保持。
+
+验证：全上位机 mypy 默认跟随导入检查和原 follow-imports=silent 检查均 0 error（19 文件）；GUI smoke PASS；MPC 专项 6/6（复用既有 artifacts pytest 兼容适配器以捕获旧装饰器吞掉的断言）；multirate 18/18；solver/protocol/safety 25/25；共享控制 6/6；CURT parser/GUI 132/132；仿真基础 8/8。测试进程沿用单 BLAS 线程诊断设置与工作区临时目录，未改控制线程或 MPC 10/30 Hz 配置。
+
+ruff 104 → 104 个原有诊断，按文件/规则/信息对比新增 0；black 15 → 15 个需格式化文件，文件集合一致。没有扩大到 lint 清理或整仓格式化。源码保护检查确认五个修改 Python 文件去掉新增类型信息后 AST 一致，所有既有函数和类定义原文一致，包含 DipoleSolver 类与 send_commands()；其余控制、MPC、CURT、模型和固件保持字节一致。本轮未 commit 或 push。
