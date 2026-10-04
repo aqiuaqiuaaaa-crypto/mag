@@ -411,6 +411,11 @@
               <FilePath>../Core/Src/current_sense.c</FilePath>
             </File>
             <File>
+              <FileName>uart_telemetry.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>../Core/Src/uart_telemetry.c</FilePath>
+            </File>
+            <File>
               <FileName>gpio.c</FileName>
               <FileType>1</FileType>
               <FilePath>../Core/Src/gpio.c</FilePath>

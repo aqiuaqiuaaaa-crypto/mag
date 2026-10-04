@@ -20,6 +20,7 @@
 
 #include "string.h"
 #include "current_sense.h"
+#include "uart_telemetry.h"
 #include "../SYSTEM/delay/delay.h"
 #include "../BSP/EXTI/exti.h"
 #include "../BSP/LED/led.h"
@@ -504,18 +505,13 @@ int main(void)
                 /*
                  * UART¿ÕÏÐºó·¢ËÍ12×Ö½Ú
                  */
-                if (huart1.gState == HAL_UART_STATE_READY)
-                {
-                    HAL_UART_Transmit_DMA(
-                        &huart1,
-                        tx_buf,
-                        12
-                    );
-                }
+                UARTTelemetry_QueueEcho(tx_buf, 12U);
             }
         }
     }
 
+    /* Foreground-only UART owner; ADC continues at 500 Hz. */
+    UARTTelemetry_Poll();
   }
 
   /* USER CODE END 3 */

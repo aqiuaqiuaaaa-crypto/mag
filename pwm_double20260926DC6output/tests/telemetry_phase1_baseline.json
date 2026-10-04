@@ -1,0 +1,27 @@
+{
+  "source": "phase-1 before telemetry edits, snapshot C:\\Users\\ADMINI~1\\AppData\\Local\\Temp\\mag-telemetry-before-20261003-lvo0nr4t",
+  "files": {
+    "pwm_02.ioc": "8e057330e22f297f5b212ce92b5cc045ac6653b3cf63127ad2e90174e51913b8",
+    "MDK-ARM/pwm_02.uvprojx": "7f60ec238678f82662420c2b752852ea82f72c5659ed8f828d1576ec76b4f43c",
+    "Core/Inc/adc.h": "366d84a77583346723d08e0c6d9ceefadba1ecf5c192bafef2db61cbedf7171e",
+    "Core/Inc/current_sense.h": "4df1ca5fc248ed6128263ecb6bb966b4aa10e4d4997b1ab3d12c10ce5df2c6d1",
+    "Core/Inc/dma.h": "7cf6f7450a29d26303cbba5a3ca8c6cb24a02635d6a5ba4d05141fdfc75c4c49",
+    "Core/Inc/gpio.h": "03d62ee017618cf03e0b1acf11baa022cf45d2a74c882c6b4382922f68abddfc",
+    "Core/Inc/main.h": "64e8f48dbe60c923d1e5c65d14908dbb6fde0cab1f61503224991a70d3c76f76",
+    "Core/Inc/stm32f4xx_hal_conf.h": "b7481dfcc9957e2b78d25d54b6409f0cab6fabf8c8392eb62b977fae53ceff35",
+    "Core/Inc/stm32f4xx_it.h": "d0e6888afc3469cd4d84ff89617be5ee2d3a68415d10d66be9c881c53d019ba8",
+    "Core/Inc/tim.h": "8402eb5af02580341303ff5d1213ac2de9126a372ef46a3a5c523c3398a562ce",
+    "Core/Inc/usart.h": "30e4aed40192599f74aebc0e49ef0f1e47ab57fe95c6768f97bcc0addfadb1b9",
+    "Core/Src/adc.c": "6c1558728cbf0615e865e1db272da8f029beacdd49aa45ab325ddf1fbdc87ce3",
+    "Core/Src/current_sense.c": "b29723e45866d7bab837f204a8df46d1f065dadc9577cbdb11d4997cc1040771",
+    "Core/Src/dma.c": "b48bc1d28e2bd13d442b7b3789bf9dec6dbfb5a0e6a60267731e66e48d19f57d",
+    "Core/Src/gpio.c": "af7a6d9072431d489f9c0fab597e134a386da008567bca7ef5360e82ad5a9189",
+    "Core/Src/main.c": "2f076f7f42504791c38f8c9175e4e3d7fcdf040c4c91462fe364b8df51e0502b",
+    "Core/Src/stm32f4xx_hal_msp.c": "dae4340cf8d760c89d753534fcf3ab6dcff8cdf6d7c69ff7faac4806b6479d66",
+    "Core/Src/stm32f4xx_it.c": "5675194c19f68f038d61d3bba385f312d85aee93905cdb2bcb414f1cf4ad84e3",
+    "Core/Src/system_stm32f4xx.c": "cdec0a2a4f0cfde6eae5bc16fce9466367fb3e2986bdfaa673822b64548958fe",
+    "Core/Src/tim.c": "27adc68b730600ae01c6c8abfdf839e4f140f0eae6ff52ab733259b1d04ed894",
+    "Core/Src/usart.c": "67732023e3fba802b75e7d8fc5802f32cd8bc829951fff6fc9610263dfdba32e"
+  },
+  "project_addition": "            <File>\n              <FileName>uart_telemetry.c</FileName>\n              <FileType>1</FileType>\n              <FilePath>../Core/Src/uart_telemetry.c</FilePath>\n            </File>\n"
+}
