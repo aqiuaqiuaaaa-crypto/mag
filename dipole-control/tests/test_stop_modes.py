@@ -148,7 +148,8 @@ def test_coil_drive_emergency_cannot_restart(
     assert_modes_cleared(window)
     assert window.mode == "IDLE" and not window.stopping
     advance(window, clock, 30)
-    assert port.frames[first_stop_frame:] == [ZERO_FRAME]
+    # Immediate zero followed by one unchanged IDLE heartbeat per tick.
+    assert port.frames[first_stop_frame:] == [ZERO_FRAME] * 31
     assert window.last_sent_cmd == [0] * 6
     scan.assert_not_called()
 
@@ -167,7 +168,7 @@ def test_emergency_disarms_every_active_mode(
     assert_modes_cleared(window)
     assert window.last_sent_cmd == [0] * 6 and not window.stopping
     advance(window, clock, 30)
-    assert port.frames[stop_index:] == [ZERO_FRAME]
+    assert port.frames[stop_index:] == [ZERO_FRAME] * 31
     assert window.mode == "IDLE" and window.last_sent_cmd == [0] * 6
     for spy in spies:
         spy.assert_not_called()
@@ -204,6 +205,8 @@ def test_normal_stop_keeps_existing_slew_and_stays_zero(
                     0
                 ].encode("ascii")
             )
+        else:
+            expected.append(ZERO_FRAME)  # New IDLE heartbeat after original ramp.
         advance(window, clock)
         assert window.last_sent_cmd == previous
     assert port.frames[frame_index:] == expected and expected[-1] == ZERO_FRAME

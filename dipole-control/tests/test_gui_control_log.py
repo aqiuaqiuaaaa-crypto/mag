@@ -306,7 +306,7 @@ def test_manual_idle_and_estimator_fields(
     assert all(row["estimator_mode"] == estimator for row in control)
     assert bool(control[-1]["kf_x"]) == (estimator == "KALMAN")
     assert int(control[-1]["cmd_sent_a0"]) == window._current_cmd_limit()
-    assert len(window.ser.frames) == 6
+    assert len(window.ser.frames) == 7  # Initial IDLE heartbeat + six active ticks.
 
 
 def test_open_failure_leaves_control_running(

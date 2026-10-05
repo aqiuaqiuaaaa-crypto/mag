@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import bead_sim_gui as sim_gui
 import magnetic_dipole_pid as gui
 from PySide6.QtWidgets import QApplication
+from test_gui_curt_telemetry import MemorySerial
 
 
 @pytest.fixture(scope="session")
@@ -107,9 +108,10 @@ def test_send_failure_disconnects_and_logs(
     window.ser = port
     window.send_commands([99, -99, 0, 0, 0, 0])
     assert port.close_attempted and window.ser is None
-    assert window.last_sent_cmd == [9, -9, 0, 0, 0, 0]
+    assert window.last_sent_cmd == [0] * 6  # Failed writes cannot advance send history.
+    assert window.serial_fault and window.mode == "SERIAL_FAULT"
     assert window.btn_serial.text() == "连接"
-    assert "串口错误" in window.lbl_serial.text()
+    assert "串口故障，STM32 可能仍保持最后成功命令" in window.lbl_serial.text()
     assert any(record.exc_info for record in caplog.records)
     if close_error is not None:
         assert "关闭失败" in window.lbl_serial.text()
@@ -145,7 +147,8 @@ def test_emergency_failure_stops_real_worker(
     assert not worker.is_alive() and window.worker is None
     assert window.shared.stopped()
     assert not window.tracking and not window.stopping
-    assert window.last_sent_cmd == [0] * 6 and window.mode == "IDLE"
+    assert window.last_sent_cmd == [50] * 6 and window.mode == "SERIAL_FAULT"
+    assert window.serial_fault
     assert any(record.exc_info for record in caplog.records)
     window.ser = None
 
@@ -180,13 +183,10 @@ def test_connect_initial_write_failure_cleans_up(
     port = FailingSerial(error)
     window.combo_port.addItem("MOCK")
     monkeypatch.setattr(gui, "_serial", SimpleNamespace(Serial=lambda *a, **k: port))
-    if isinstance(error, OSError):
-        window.toggle_serial()
-    else:
-        with pytest.raises(RuntimeError, match="bug"):
-            window.toggle_serial()
+    window.toggle_serial()
     assert port.close_attempted and window.ser is None
     assert not window.adc_rx_timer.isActive()
+    assert window.serial_fault and window.mode == "SERIAL_FAULT"
 
 
 @pytest.mark.parametrize("payload", [b"{", b"[]", b"\xff", b'{"n_coils":null}'])
@@ -254,6 +254,7 @@ def test_diagnostic_bug_is_logged_without_blocking_send(
         raise KeyError("unexpected model output")
 
     monkeypatch.setattr(window.solver, "forward_model", fail)
+    window.ser = MemorySerial()
     window.send_commands([0] * 6)
     assert np.array_equal(window.current_B_T, np.zeros(3))
     assert np.array_equal(window.current_F_N, np.zeros(3))
@@ -361,7 +362,8 @@ def test_settings_save_io_failure_does_not_prevent_stop(
     window.tracking = True
     window.last_sent_cmd = [50] * 6
     window.close()
-    assert window.last_sent_cmd == [0] * 6 and window.shared.stopped()
+    assert window.last_sent_cmd == [50] * 6 and window.shared.stopped()
+    assert not window.tracking  # No connected port means no successful zero write.
     assert "参数保存失败" in capsys.readouterr().out
 
 
@@ -378,7 +380,7 @@ def test_settings_serialization_bug_does_not_prevent_stop(
     monkeypatch.setattr(gui.json, "dump", fail)
     window.last_sent_cmd = [50] * 6
     window.close()
-    assert window.last_sent_cmd == [0] * 6 and window.shared.stopped()
+    assert window.last_sent_cmd == [50] * 6 and window.shared.stopped()
     assert any(record.exc_info for record in caplog.records)
 
 

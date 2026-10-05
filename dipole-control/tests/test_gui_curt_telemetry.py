@@ -94,8 +94,11 @@ def ports(monkeypatch: pytest.MonkeyPatch) -> list[MemorySerial]:
     """Replace the actual COM opener and enumeration before constructing a GUI."""
     opened: list[MemorySerial] = []
 
-    def open_port(port: str, baud: int, *, timeout: int) -> MemorySerial:
+    def open_port(
+        port: str, baud: int, *, timeout: int, write_timeout: float
+    ) -> MemorySerial:
         assert port == "MOCK-COM" and baud == gui.cfg.BAUDRATE and timeout == 0
+        assert write_timeout == 0.05
         serial = MemorySerial()
         opened.append(serial)
         return serial

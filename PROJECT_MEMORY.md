@@ -2,7 +2,23 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 最新权威摘要（2026-10-05：修复 stop 后 coil scan 重新通电，独立任务）
+## 最新权威摘要（2026-10-05：PC 串口故障锁存、write timeout、IDLE heartbeat，独立任务）
+
+- 基于 `c0bd30673d2d80d95ba01695156f8d267c212ec1`（`fix: prevent coil scan restart after stop`），本轮仅修改 PC 串口安全边界、模式入口保护及状态显示，新增 `tests/test_serial_safety.py`；现有测试仅适配写超时参数、新发送历史语义及新增 IDLE heartbeat 帧数。
+- 根因已在原 checkpoint 的合成相机/假串口中复现：实际最后成功帧为 `a0:+18,...`，写失败后 GUI 的 a0 却更新到 `+27`，之后 30 tick 又变成 `+40`，手动实时模式仍开启、串口已经释放。旧急停同样在零帧写失败/无连接时无条件将本地历史置零；此前没有 write timeout，IDLE 不发帧。
+- 串口打开使用 `timeout=0`（原非阻塞读取不变）、`write_timeout=0.05`，波特率仍为 115200。新增 `serial_fault: bool`，初始化 False；只有新连接的完整全零帧成功写入后，连接流程才能从故障态解除锁存、清理模式、恢复 IDLE，入口恢复可用，不自动恢复原主动模式。打开失败或重连零帧失败不能解除已有故障。
+- `_write_serial_frame()` 是命令、急停零帧、重连零帧、IDLE heartbeat 共用的成功确认/TX 故障入口。必须 `write()` 返回完整 43 字节才视为成功；SerialTimeoutException、SerialException、OSError 和现有安全边界内的其他 writer 异常，以及短写，均锁存故障并保留 traceback。`_latch_serial_fault()` 先设 `serial_fault=True`、`stopping=False`、`mode="SERIAL_FAULT"`，复用原 `_clear_active_modes(wait_for_worker=False)` 取消全部主动模式及 worker，释放端口/停止该连接的 RX，再按原 `_stop_worker()` 语义 join。端口关闭预期失败也保留故障；异常关闭的原清理/传播语义保持。
+- **`last_sent_cmd` 新语义：最后一次完整成功写入 PC 串口 API 的六路命令。** 除构造时的 `[0]*6` 初始默认值外，仅在完整 write 成功之后赋值；没有连接、写失败、短写、失败的急停或失败的重连都不改它。初始默认零不是 STM32 已归零的确认，API write 成功也不是 MCU ACK 或真实电流反馈。GUI 串口标签和状态栏明确显示“串口故障，STM32 可能仍保持最后成功命令”，命令行改称“最后成功命令”。正常 stop/急停及重复发送均不能解除故障。
+- `_serial_control_allowed()` 守住 tracking、手动 current/force realtime、coil scan、dir test、friction calibration 六种实际入口；手动单次力解算发送也通过同一保护。故障期间入口拒绝且按钮/复选框复位，不启动 worker；tick 的故障分支优先于 stopping/主动模式，跳过控制分派及 heartbeat，视觉/状态监测和已有控制日志继续。未改变原模式启动的数学、状态估计或离线调试入口，仅未连接时不再虚构发送成功。
+- `_send_idle_heartbeat()` 在已连接、无故障、无主动模式的 IDLE tick，以及正常停止完成切入 IDLE 的 tick，重发 `last_sent_cmd`。只构造原协议帧并 write，不调用 slew、solver、MPC、CurrentExecutor 或额外磁场/磁力更新，保留手动单次发送后的非零保持语义。原主动控制/正常斜率归零/急停全零帧保持；heartbeat 写失败同样锁存。带宽：`43 bytes × 30 Hz = 1290 B/s`；默认 8N1 为 `12900 bit/s`，占 `115200` 的约 **11.2%**，每帧线上时间约 **3.73 ms**。原 `serial_ms` 仍表示最近一次 send_commands 耗时，未增加日志字段。
+- 串口专项 **46/46**：两类指定 I/O 错误覆盖六种真实主动模式、故障后各 30 tick、六模式入口拒绝、成功零帧恢复六种入口、失败零帧继续锁存、50 ms 写超时/timeout=0 配置、完整写后才更新历史、两种短写、fault 下 stop/单次发送不能清故障、无连接不虚构成功、30 个 IDLE tick 原值 heartbeat/无 slew/MPC/执行器计算、heartbeat/急停/断开零帧失败、真实 worker 退出，以及普通 SerialException。结合原 close/write 错误测试，新四个安全 helper 标准库行跟踪 **40/40（100%）**。
+- 固定输入/dt/worker 时序对照原 checkpoint：六模式各分别走 normal_stop 和 emergency_stop，共 **1440 个主动区间 tick、360 个停止区间 tick**；**1452 条原有主动区间帧、27 条原有停止帧逐位一致**。每次操作分别比较，新增 **351 条帧全部且仅为 IDLE 原值 heartbeat**；KF/ESO 状态、R-L、CurrentExecutor、worker 目标及控制状态按数组字节/浮点二进制比较一致。不能用总帧数相同作为本轮等价标准。
+- 源码保护：去掉 fault 入口 guard 后，七个模式入口/手动求解调用函数的计算 AST 与基线保持；去掉 fault 分派/heartbeat 后 tick 计算 AST 保持。send_commands 幅值、斜率、整数化、build_command 原安全计算原文保持，build_command/apply_slew、统一模式清理及其余 **114 个 GUI 函数原文保持**；其余 **26 个上位机文件、146 个固件文件逐字节保持**。未改 MPC/ESO/solver/路径/坐标/freshness/R-L/CURT/ADC 控制，95/46 列日志字段不变。
+- 全量回归：Ruff **0**、Black **25 files PASS**、mypy **0/25 files**，专项测试模块 `--strict --follow-imports=silent` **PASS**；GUI smoke PASS、shared control **6/6**、MPC **6/6**、multirate **18/18**、solver/protocol/safety **25/25**、CURT **132/132**、control log **25/25**、stop modes **21/21**、error paths **46/46**、bead simulator **8/8**、串口专项 **46/46** 全部通过。本轮 multirate 首测即通过，未修改测试阈值/节拍；error paths 保留 10 条原空图例 warning。
+- 证据保存在 `artifacts/serial-safety-20261005/`：`baseline-reproduction.json`、`replay-results.json`、`protection-results.json`、`coverage-results.json`、`final-results.json`、各检查 stdout/stderr。仅合成相机/假串口软件验证，未打开真实 COM/相机、操作实板或构建/烧写固件。**STM32 command watchdog 未实现或启用**；通信中断后的物理归零仍须后续明确授权的 firmware command watchdog 阶段及台架验证，PC 锁存/heartbeat 本身不能保证 MCU 断电归零。
+- 用户授权验证通过后建立唯一独立 checkpoint：`fix: latch serial faults and add idle heartbeat`（本条所在提交），不 push；仅提交 GUI 串口安全代码、专项测试、四个相关测试适配及本记忆，artifacts 不提交。
+
+## 历史摘要（2026-10-05：修复 stop 后 coil scan 重新通电，独立任务）
 
 - 基于 `86ec4d62f3061dfe091414b90325c59664c69963`（`feat: add unified control diagnostics logging`）。本轮仅修改停止模式清理，新增 `dipole-control/tests/test_stop_modes.py`，其余主控制链和日志基础设施不变。
 - 根因已用真实 GUI tick、合成相机及假串口复现：扫描进入 drive 并采样后输出 `a0:+50`；旧 `emergency_stop()` 虽立即发全零，但保留 `coil_test_idx=0` 和 drive 状态，下一 tick 命中 `elif self.coil_test_idx is not None`，通过原斜率层再次发送 `a0:+09`。旧 `normal_stop()` 清 idx，却未复位扫描临时状态。

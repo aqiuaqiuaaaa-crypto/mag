@@ -18,12 +18,14 @@ import math
 import os
 import sys
 import time
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 
 import cv2
 import numpy as np
+from numpy.typing import NDArray
 
 _serial: ModuleType | None
 list_ports: ModuleType | None
@@ -76,6 +78,9 @@ SETTINGS_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "gui_settings.json"
 )
 logger = logging.getLogger(__name__)
+
+SERIAL_WRITE_TIMEOUT_S = 0.05
+SERIAL_FAULT_MESSAGE = "串口故障，STM32 可能仍保持最后成功命令"
 
 ADC_RX_INTERVAL_MS = 15
 ADC_RX_MAX_BYTES = 1024
@@ -362,6 +367,7 @@ class MagneticDipoleControl(QMainWindow):
         # ---------- 控制状态 ----------
         self.last_time = time.time()
         self.last_sent_cmd = [0] * 6
+        self.serial_fault: bool = False
         self.man_currents = [0] * 6
         self.stopping = False
         self.last_solver_rec = None
@@ -688,9 +694,11 @@ class MagneticDipoleControl(QMainWindow):
     def on_manual_current(self, idx, val):
         self.man_currents[idx] = val
 
-    def _on_manual_current_live(self, on):
+    def _on_manual_current_live(self, on: bool) -> None:
         """手动实时电流具有最高优先级；开启时明确退出其他控制模式。"""
         if not on:
+            return
+        if not self._serial_control_allowed():
             return
         self.tracking = False
         self.dir_test_on = False
@@ -703,8 +711,10 @@ class MagneticDipoleControl(QMainWindow):
         self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
-    def _on_manual_force_live(self, on):
+    def _on_manual_force_live(self, on: bool) -> None:
         if not on:
+            return
+        if not self._serial_control_allowed():
             return
         self.chk_cur_live.setChecked(False)
         self.tracking = False
@@ -782,8 +792,10 @@ class MagneticDipoleControl(QMainWindow):
             > max_active
         )
 
-    def _solve_and_send(self, f_uN):
+    def _solve_and_send(self, f_uN: NDArray[np.float64]) -> None:
         """期望力(µN) → 力/10mT 场幅值联合逆解 → 最终整数电流。"""
+        if not self._serial_control_allowed():
+            return
         pos_m = self._bead_pos_m()
         force_N = np.asarray(f_uN, float) * 1e-6
         try:
@@ -2275,15 +2287,17 @@ class MagneticDipoleControl(QMainWindow):
             for p in list_ports.comports():
                 self.combo_port.addItem(p.device)
 
-    def toggle_serial(self):
+    def toggle_serial(self) -> None:
         if self.ser:
             self._stop_adc_rx()
             # 断开前先发硬急停帧，避免 MCU 保持最后一条非零指令。
             self.emergency_stop()
-            self.ser.close()
-            self.ser = None
+            if self.ser:
+                self.ser.close()
+                self.ser = None
             self.btn_serial.setText("连接")
-            self.lbl_serial.setText("未连接")
+            if not self.serial_fault:
+                self.lbl_serial.setText("未连接")
             return
         if not _serial:
             QMessageBox.warning(self, "串口", "未安装 pyserial")
@@ -2293,10 +2307,18 @@ class MagneticDipoleControl(QMainWindow):
             QMessageBox.warning(self, "串口", "没有可用串口")
             return
         try:
-            self.ser = _serial.Serial(port, cfg.BAUDRATE, timeout=0)
+            self.ser = _serial.Serial(
+                port, cfg.BAUDRATE, timeout=0, write_timeout=SERIAL_WRITE_TIMEOUT_S
+            )
             # 新连接从已知的零输出状态开始，不能沿用上次会话的斜率历史。
-            self.ser.write(b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n")
-            self.last_sent_cmd = [0] * 6
+            if not self._write_serial_frame(
+                b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n", [0] * 6
+            ):
+                return
+            self._clear_active_modes()
+            self.stopping = False
+            self.serial_fault = False
+            self.mode = "IDLE"
             self.btn_serial.setText("断开")
             self.lbl_serial.setText(f"已连接 {port}")
             self._reset_adc_session()
@@ -2322,31 +2344,77 @@ class MagneticDipoleControl(QMainWindow):
                 self.btn_serial.setText("连接")
             raise
 
-    def send_commands(self, cmd_list):
+    def _serial_control_allowed(self) -> bool:
+        """Reject mode entries until reconnect has written a complete zero frame."""
+        if not self.serial_fault:
+            return True
+        self._clear_active_modes()
+        self.stopping = False
+        self.mode = "SERIAL_FAULT"
+        self.lbl_serial.setText(SERIAL_FAULT_MESSAGE)
+        return False
+
+    def _latch_serial_fault(self, error: Exception) -> None:
+        """Disarm locally without claiming that the MCU received a stop command."""
+        self.serial_fault = True
+        self.stopping = False
+        self.mode = "SERIAL_FAULT"
+        self._clear_active_modes(wait_for_worker=False)
+        port = self.ser
+        self.ser = None
+        self.btn_serial.setText("连接")
+        self.lbl_serial.setText(f"{SERIAL_FAULT_MESSAGE}: {error}")
+        try:
+            self._stop_adc_rx()
+            if port:
+                port.close()
+        except (OSError, ValueError) as close_error:
+            logger.warning("发送失败后串口关闭失败: %s", close_error)
+            self.lbl_serial.setText(
+                f"{SERIAL_FAULT_MESSAGE}: {error}; 关闭失败: {close_error}"
+            )
+        finally:
+            self._stop_worker()
+
+    def _write_serial_frame(self, frame: bytes, cmd: list[int]) -> bool:
+        """Commit send history only after a full write; latch every TX failure.
+
+        The safety boundary includes SerialTimeoutException, SerialException,
+        OSError and unexpected writer errors. A successful write is a PC API
+        result, not an acknowledgement from STM32.
+        """
+        if self.ser is None:
+            return False
+        try:
+            written = self.ser.write(frame)
+            if written != len(frame):
+                raise OSError(f"串口短写: {written}/{len(frame)} bytes")
+        except Exception as error:
+            logger.exception("串口发送失败，锁存故障并停止本地控制")
+            self._latch_serial_fault(error)
+            return False
+        self.last_sent_cmd = list(cmd)
+        return True
+
+    def _send_idle_heartbeat(self) -> None:
+        """Repeat the successful command verbatim, without slew or model updates."""
+        if self.ser is None or self.serial_fault:
+            return
+        frame, cmd = build_command(self.last_sent_cmd)
+        self._write_serial_frame(frame.encode("ascii"), cmd)
+
+    def send_commands(self, cmd_list: Sequence[float]) -> None:
         """统一发送安全层：幅值限幅 + 斜率限幅，再按 43 字节协议发送。
         所有模式都经过；电流约束的正式实现位于 Solver（箱约束），此处为
         最后一道独立安全层。"""
+        if self.serial_fault or self.ser is None:
+            return
         t0 = time.perf_counter()
         limit = self._current_cmd_limit()
         cmd = apply_slew(cmd_list, self.last_sent_cmd, cfg.MAX_DELTA_CMD, max_cmd=limit)
         frame, cmd = build_command(cmd, max_cmd=limit)
-        if self.ser:
-            try:
-                self.ser.write(frame.encode("ascii"))
-            except Exception as e:
-                # TX 是安全边界，程序错误也要先断开端口；日志保留完整堆栈。
-                logger.exception("串口发送失败，断开端口")
-                self.lbl_serial.setText(f"串口错误: {e}")
-                try:
-                    self.ser.close()
-                except (OSError, ValueError) as close_error:
-                    logger.warning("发送失败后串口关闭失败: %s", close_error)
-                    self.lbl_serial.setText(f"串口错误: {e}; 关闭失败: {close_error}")
-                finally:
-                    self.ser = None
-                    self.btn_serial.setText("连接")
-        self.last_sent_cmd = list(cmd)
-        self._update_local_field_force()
+        if self._write_serial_frame(frame.encode("ascii"), cmd):
+            self._update_local_field_force()
         self.serial_ms = (time.perf_counter() - t0) * 1e3
 
     def _update_local_field_force(self):
@@ -2396,22 +2464,19 @@ class MagneticDipoleControl(QMainWindow):
         else:
             self.shared.stop()
 
-    def normal_stop(self):
-        self.stopping = True
-        self.mode = "STOPPING"
+    def normal_stop(self) -> None:
+        self.stopping = not self.serial_fault
+        self.mode = "SERIAL_FAULT" if self.serial_fault else "STOPPING"
         self._clear_active_modes()
 
-    def emergency_stop(self):
+    def emergency_stop(self) -> None:
         self.stopping = False
         self._clear_active_modes(wait_for_worker=False)
-        if self.ser:
-            try:
-                self.ser.write(b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n")
-            except Exception:
-                # 急停写入失败也必须继续清零本地状态并停止工作线程。
-                logger.exception("急停零指令发送失败，继续停止本地控制")
-        self.last_sent_cmd = [0] * 6
-        self.mode = "IDLE"
+        if self.ser and not self.serial_fault:
+            self._write_serial_frame(
+                b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n", [0] * 6
+            )
+        self.mode = "SERIAL_FAULT" if self.serial_fault else "IDLE"
         self._stop_worker()
 
     def _stop_worker(self):
@@ -2532,7 +2597,9 @@ class MagneticDipoleControl(QMainWindow):
         self.path_px = self._resampled([tuple(p) for p in arr[::3]])
 
     # ================= 追踪 =================
-    def start_tracking(self):
+    def start_tracking(self) -> None:
+        if not self._serial_control_allowed():
+            return
         if not self.model_ok:
             QMessageBox.warning(
                 self, "追踪", f"模型不可用，禁止自动控制。\n{self.model_err}"
@@ -2647,7 +2714,9 @@ class MagneticDipoleControl(QMainWindow):
         )
 
     # ================= 诊断模式 =================
-    def toggle_dir_test(self, on):
+    def toggle_dir_test(self, on: bool) -> None:
+        if on and not self._serial_control_allowed():
+            return
         if on and not self.model_ok:
             self.btn_dir_test.setChecked(False)
             return
@@ -2663,7 +2732,9 @@ class MagneticDipoleControl(QMainWindow):
             self._stop_worker()
             self._reset_controllers()
 
-    def toggle_calib(self, on):
+    def toggle_calib(self, on: bool) -> None:
+        if on and not self._serial_control_allowed():
+            return
         if on and not self.model_ok:
             self.btn_calib.setChecked(False)
             return
@@ -2718,7 +2789,9 @@ class MagneticDipoleControl(QMainWindow):
             )
         QMessageBox.information(self, "保存", f"已保存 {len(self.calib_records)} 行")
 
-    def start_coil_scan(self):
+    def start_coil_scan(self) -> None:
+        if not self._serial_control_allowed():
+            return
         if not self.model_ok:
             return
         if self.bead is None:
@@ -2780,7 +2853,7 @@ class MagneticDipoleControl(QMainWindow):
             self._control_tick_row.update(meas_x_mm=float(z[0]), meas_y_mm=float(z[1]))
 
     # ================= 主循环（≈30Hz, dt 实测） =================
-    def tick(self):
+    def tick(self) -> None:
         t_cycle = time.perf_counter()
         if self.last_tick_time is not None:
             actual_period = t_cycle - self.last_tick_time
@@ -2835,12 +2908,15 @@ class MagneticDipoleControl(QMainWindow):
 
         # 4-17. 控制分支
         t2 = time.perf_counter()
-        if self.stopping:
+        if self.serial_fault:
+            self.mode = "SERIAL_FAULT"
+        elif self.stopping:
             if any(c != 0 for c in self.last_sent_cmd):
                 self.send_commands([0] * 6)
             else:
                 self.stopping = False
                 self.mode = "IDLE"
+                self._send_idle_heartbeat()
         elif self.chk_cur_live.isChecked():
             self.mode = "MANUAL_CURRENT"
             self.send_commands(self.man_currents)
@@ -2865,6 +2941,7 @@ class MagneticDipoleControl(QMainWindow):
             )
         else:
             self.mode = "IDLE"
+            self._send_idle_heartbeat()
         self.controller_ms = (time.perf_counter() - t2) * 1e3
 
         total = (time.perf_counter() - t_cycle) * 1e3
@@ -3304,8 +3381,10 @@ class MagneticDipoleControl(QMainWindow):
         img = QImage(rgb.data, disp_w, disp_h, 3 * disp_w, QImage.Format_RGB888)
         self.video.setPixmap(QPixmap.fromImage(img.copy()))
 
-    def update_status(self, dt):
-        if self.stopping:
+    def update_status(self, dt: float) -> None:
+        if self.serial_fault:
+            mode = f"SERIAL_FAULT: {SERIAL_FAULT_MESSAGE}"
+        elif self.stopping:
             mode = "停止归零中(斜率限制)"
         else:
             mode = self.mode
@@ -3375,7 +3454,7 @@ class MagneticDipoleControl(QMainWindow):
         timeout = " | ⚠控制周期超时" if self.cycle_over_cnt >= 5 else ""
         self.status_lbl.setText(
             f"模式: {mode} | 磁珠: {pos} {vel} | "
-            f"电流: [{', '.join(f'{c:+03d}' for c in self.last_sent_cmd)}]{extra} | "
+            f"最后成功命令: [{', '.join(f'{c:+03d}' for c in self.last_sent_cmd)}]{extra} | "
             f"Cycle {self.total_ms:.1f}ms ({1.0 / dt:.0f}Hz){timeout}"
         )
 
