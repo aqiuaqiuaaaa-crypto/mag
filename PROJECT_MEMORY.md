@@ -2,6 +2,27 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-06：统一路径弧长 progress / 局部连续投影，独立任务）
+
+- 基于 `93c2e46902c664c68e449f0b0520501af2ac06d6`（`fix: enforce control data freshness`），只实现路径进度连续性与唯一权威来源。未改 MPC/ESO/solver 数学、target box、CurrentExecutor 整类（含 interpolation/slew/R-L）、freshness 阈值/旧发布检查、serial/watchdog、frame transform、物理/摩擦/CURT/ADC 或固件；路径生成器/resample/lead 原文保持。
+- 旧“双进度源”实际根因：worker `_reference_window()` 对全路径无约束投影得到 `_ref_arc`，生成 lookahead/reference；GUI `mpc_track_step()` 另用 while target_idx 与0.5mm距离推进，并独立判停，黄色目标点也读该 index。圆/闭合/自交几何上相近的远端弧长能抢占投影，而 GUI index 不一定同步。
+- 新 `path_progress.py`：冻结的 `PathProgress(s_progress,s_total,finished,target_idx,path_deviation,distance_mm,expanded_search)` 和 `PathGeometry`。s 单位 camera-world mm，包含原 lead；不自动闭合首尾、不改变重采样。target_idx 仅由投影弧长的线段终点派生，纯显示/legacy debug；控制不再用 index 推进或结束。worker `_ref_arc` 保留为已提交 s_progress 的兼容诊断别名。
+- 唯一计算者是 ControlWorker。`_reference_window()` 只生成 `_pending_progress` 和原 lookahead/插值/切向 vref；不更新已提交 progress。`SharedState.set_I_target(...progress=...,expected_reference=...)` 在原 freshness/stop/seq 检查通过后，以同一锁原子发布目标和 progress。worker 仅成功后更新自身 snapshot/alias；stale 输入、慢 solve、stop、seq 竞争或新 reference generation 都不得推进 s 或覆盖新路径。
+- start/reset：GUI `start_tracking()` 仍按原 lead 构建 full_path，创建新 SharedState/worker；`set_reference()` 将 s_progress=0、finished=False、deviation=False，s_total取当前路径，并递增 reference generation。worker 下一次有效周期同步新 reference；旧路径正在求解的结果被 generation guard 拒绝。停止后 worker 按原 join/event 语义退出，没有后续 progress 提交。
+- **局部搜索**：`lower=max(0,s_prev-PATH_BACKTRACK_MM)`，`upper=min(s_total,s_prev+max(PATH_PROJ_FWD_MIN_MM,PATH_PROJ_FWD_FACTOR*(Fmax/c)*T_mpc))`；先筛选交叠线段，再裁剪线段中的投影比例，不允许整条长线段绕过弧长窗口。默认 backtrack=0.3mm、fwd_min=1.0mm、factor=3；Fmax/c 使用当前 worker MPC 限制/拖曳系数，未另设实际速度参数。
+- **fallback/lost**：局部最近距离严格 >1.5mm 才从相同 lower 往前扩大至尾部；扩大后距离严格 >3.0mm 才 PATH_DEVIATION。恰好1.5/3.0不升级。偏离只通过受 input age/stop/seq/generation 检查的 `report_path_deviation()` 标记状态/距离，保留旧 s/target/seq/timestamps，不求逆解/发布控制目标；GUI 调原 normal_stop，不 emergency_stop。
+- **finished**：同时满足 `s_progress >= s_total-finish_tol` 和 `distance_to_actual_end <= finish_tol`，并且没有 deviation。finish_tol复用原 `spin_tol_default()` 的0.5mm，现在唯一默认在config `PATH_FINISH_TOL_MM`，GUI仍通过原方法发布 finish_tol_mm 参数。六个路径默认全部集中配置，是保守软件默认，**不是实机最终标定值**。
+- 生产调用点：SharedState `set_reference()` 重置；worker `_step()` → `_reference_window()` 暂存候选 → `set_I_target()` 原子提交；偏离走 `report_path_deviation()` 而不提交arc。GUI `mpc_track_step()` 首先调用 `_check_path_progress()`，从同一 SharedState 读取 finished/deviation 并 normal_stop，视觉丢失提前 return 也无法绕过；`render()` 黄色点/target_idx 直接从 progress 派生。GUI `_publish_mpc_params()` 只传原 finish tolerance，不生成控制进度。
+- 最小日志：已有 s_progress 接统一 authority，仅新增 s_total/finished/path_deviation，两流分别**101/51列**；worker正常行记录本次提交，STALE_INPUT/PATH_DEVIATION行沿用旧 seq、未求解列为空。GUI `_finish_control_log_tick()` 记录最新已提交 SharedState progress（含结束但尚未采用最终seq的情况）；ref/F/I目标仍按执行器采用的run+seq关联，所以异步发布时最新progress可能比执行器seq更新，metadata与CONTROL_LOG.md明确这一区别。logger写盘/队列机制不变。
+- **父实际代码复现**：半径2mm圆、总长12.566011748491mm，起点附近反向偏0.06/0.08mm时，父 `_reference_window()` 分别投影到12.506040064406/12.486055483682mm，ref到终点、vref=[0,0]。新候选s均为0，finished=False、vref范数约1mm/s；到真正尾部不回跳到起点并正确finished。矩形/三角形首尾测试同样不过早完成。
+- 新增 **34/34**：circle起点/真实尾部、闭合多边形、8字交叉、开放直线/折线reference、窗口半线段裁剪/动态fwd、fallback与1.5/3.0精确边界、两条件finish、空/单点/重复点、stale/慢solve/stop/newseq/newpath原子保护、偏离状态拒绝/重启清零、GUI index无结束权、worker finished权威（含视觉提前return）、GUI偏离normal_stop、黄色点与101/51列CSV。helper可执行语句行覆盖 **85/85（100%）**，strict mypy通过。
+- **8字连续性**：801点遍历各步s与实际所在弧长误差<1e-9mm，无跳支；最大相邻首参考位移 **0.056634075403mm**。**1000步匀弧长+sigma=0.07mm噪声**：最大回退 **0.283759479754mm**（<0.3），最大前进 **0.285516865983mm**，最大弧长误差 **0.200364771688mm**；无跳支/path lost。约2mm偏离fallback仍可恢复；约5mm偏离GUI正常归零，停止后progress不再更新。
+- **开放路径父回放**：独立父GUI+multirate与新版本，同域fake clock、固定视觉/dt/worker调度；开放直线、实际经过转角的普通折线及其他五种模式，各normal/emergency_stop，共 **1680 active tick +420 stop tick，1706 active帧+427 stop帧（2133条43-byte帧）逐位一致**。reference/worker target/seq/F_target/I_target、MPC内部、executor/cmd_sent、KF/ESO/R-L与所有非计时solver记录逐位一致；仅排除已改为纯显示派生的target_idx和clock callback身份，未新增heartbeat。
+- 回归全部通过：Ruff；Black/mypy 33文件；GUI smoke、shared6、MPC6、multirate18、solver25、bead sim8、CURT132、control log25、stop21、serial46、frame57、原freshness25（含10000tick jitter）、error46（10条原绘图warning）、已有watchdog集成7/C29。三项旧测试必要接线：GUI日志bool类型加入finished/path_deviation；reference测试先发布中间位置再验证原1.4mm参考，保持local窗口无歧义；smoke零长度路径改为真实tracking启动并等待worker finished，不再手动设置GUI控制进度。
+- **timing失败不掩盖**：首轮multirate test_solver_no_block最大帧间隔67.9ms未过原阈值；原日志与initial-regressions.json保留。独立复核18/18、最终整组18/18均通过，未改判断阈值/调度。首轮smoke暴露旧测试绕过worker的单点结束假设，按新生产权威适配后独立及最终通过。
+- 源码保护：**151固件文件逐字节不变**；整个CurrentExecutor、原freshness/stop/seq发布检查、target_status/apply_slew_cmd、MPC/ESO/solver/frame/friction/CURT等文件和所有旧freshness测试原文不变；GUI其余**113个函数**包括start/stop/serial/估计器与路径生成器原文不变。本轮仅修改6个既有GUI方法并新增_check_path_progress。
+- 证据保存在 `artifacts/path-progress-20261006/` 的 baseline-reproduction.json、replay-results.json、protection-results.json、coverage-results.json、initial-regressions.json、isolated-rechecks.json、regressions.json、quality-final.json、final-results.json及最终差异/状态。artifacts不提交；不操作实板/真实COM/相机，不构建/烧录/修改固件。全部验证通过后按用户授权独立checkpoint `fix: unify path progress tracking`，不push。
+
 ## 最新权威摘要（2026-10-06：SharedState / worker / 执行目标 freshness，独立任务）
 
 - 基于 `93add86d409a37de7515b29cd23548bfe854c686`（`fix: unify camera and model frame transforms`），本轮只实现 PC 控制数据 freshness。未改 MPC/ESO/solver 数学、target box、正常 interpolation、command slew、路径投影/进度、frame transform、R-L/物理参数、serial fault/heartbeat 实现、STM32 firmware/watchdog 或 CURT/ADC 关系；三个门槛是保守软件默认，**不是实机标定的最终参数**。

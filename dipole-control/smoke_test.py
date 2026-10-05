@@ -211,10 +211,13 @@ print("急停帧:", m.build_command([0] * 6)[0].strip())
 # 回归：到达最后一个路径点后必须结束，不能在零长度切线处生成标量 v_des
 w.bead = (960, 540, 300)
 w.state_pos_mm = np.zeros(2)
-w.full_path = [(960, 540)]
-w.path_px = list(w.full_path)
-w.target_idx = 0
-w.tracking = True
+w.path_px = [(960, 540)]
+w.start_tracking()  # worker is the sole finish authority, including zero length
+finish_deadline = time.monotonic() + 1.0
+while not w.shared.get_progress().finished and time.monotonic() < finish_deadline:
+    w.shared.set_kalman(w.state_pos_mm, w.state_vel_mm, time.time())
+    time.sleep(0.01)
+assert w.shared.get_progress().finished
 w.control_step(1.0 / 30.0)
 assert not w.tracking and w.stopping
 w.emergency_stop()

@@ -27,6 +27,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 import config as cfg
@@ -34,6 +35,7 @@ import numpy as np
 from control_log import ControlLogger, Scalar
 from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from numpy.typing import NDArray
+from path_progress import PathGeometry, PathProgress
 
 if TYPE_CHECKING:
     from mpc import ForceMPC
@@ -61,7 +63,11 @@ class SharedState:
             "t": 0.0,
             "t_mono": None,
         }
-        self._ref = {"path": [], "speed": 1.0, "t": 0.0}  # 世界系 mm 路径点
+        self._ref: dict[str, Any] = {
+            "path": [],
+            "speed": 1.0,
+            "t": 0.0,
+        }  # 世界系 mm 路径点
         self._params = {
             "fmax": cfg.MPC_FMAX_UN,
             "max_active": 6,
@@ -76,6 +82,8 @@ class SharedState:
             "t": 0.0,
             "t_mono": None,
         }
+        self._reference_version = 0
+        self._progress = PathProgress()
         self._last_sent = [0] * 6
         # 工作线程 → 主线程
         # currents 始终使用安培；串口整数指令只存在 rec["commands"] 中。
@@ -124,6 +132,46 @@ class SharedState:
                 "speed": float(speed),
                 "t": t,
             }
+            self._reference_version += 1
+            self._progress = PathProgress(
+                s_total=PathGeometry.from_path(path_world_mm).total
+            )
+
+    def get_reference_snapshot(
+        self,
+    ) -> tuple[list[NDArray[np.float64]], float, int]:
+        with self._lock:
+            return self._ref["path"], self._ref["speed"], self._reference_version
+
+    def get_progress(self) -> PathProgress:
+        """Return the immutable, last committed worker progress snapshot."""
+        with self._lock:
+            return self._progress
+
+    def report_path_deviation(
+        self,
+        distance_mm: float,
+        *,
+        input_mono: float,
+        expected_seq: int,
+        expected_reference: int,
+    ) -> bool:
+        """Latch deviation without advancing arc, target, sequence or timestamp."""
+        with self._lock:
+            if self._stop.is_set() or self._reference_version != expected_reference:
+                return False
+            if self.clock() - input_mono > cfg.KALMAN_STALE_S:
+                self._worker_status = "STALE_INPUT"
+                return False
+            if self._I_target["seq"] != expected_seq:
+                return False
+            self._progress = replace(
+                self._progress,
+                path_deviation=True,
+                distance_mm=distance_mm,
+                expanded_search=True,
+            )
+            return True
 
     def set_params(self, params: dict, t):
         with self._lock:
@@ -202,6 +250,8 @@ class SharedState:
         *,
         input_mono=None,
         expected_seq=None,
+        progress: PathProgress | None = None,
+        expected_reference: int | None = None,
     ) -> bool:
         with self._lock:
             publish_mono = self.clock()
@@ -215,6 +265,11 @@ class SharedState:
                     self._worker_status = "STALE_INPUT"
                     return False
             if expected_seq is not None and self._I_target["seq"] != expected_seq:
+                return False
+            if (
+                expected_reference is not None
+                and self._reference_version != expected_reference
+            ):
                 return False
             seq = self._I_target["seq"] + 1
             self._I_target = {
@@ -234,6 +289,8 @@ class SharedState:
                     np.zeros(2) if ref_velocity is None else ref_velocity, float
                 ).copy(),
             }
+            if progress is not None:
+                self._progress = progress
             if self.control_logger is not None:
                 self.control_logger.remember_target(
                     self.control_log_run, seq, self._I_target
@@ -296,7 +353,11 @@ class ControlWorker(threading.Thread):
         self.period = period or (1.0 / cfg.MPC_HZ)
         self.mpc_x = None
         self.mpc_y = None
-        self._ref_arc = 0.0  # 当前实际位置在路径上的投影弧长（诊断）
+        self._progress = PathProgress()
+        self._pending_progress = self._progress
+        self._reference_version = -1
+        self._finish_tol = cfg.PATH_FINISH_TOL_MM
+        self._ref_arc = 0.0  # compatibility diagnostic alias of committed s_progress
         self._c_drag = 9.42
         self._mpc_signature = None
 
@@ -323,52 +384,33 @@ class ControlWorker(threading.Thread):
             float(c_drag),
         )
 
+    @property
+    def s_progress(self) -> float:
+        return self._progress.s_progress
+
+    @property
+    def s_total(self) -> float:
+        return self._progress.s_total
+
+    @property
+    def finished(self) -> bool:
+        return self._progress.finished
+
     def _reference_window(self, path, speed, pos, horizon=None):
-        """由实际位置在路径上的最近投影生成 MPC 参考，而非按时间开环推进。"""
+        """Stage a local projection; only a successful target publish commits it."""
         horizon = int(
             horizon or (self.mpc_x.N if self.mpc_x is not None else cfg.MPC_HORIZON)
         )
-        if len(path) < 2:
-            z = [np.zeros(2) for _ in range(horizon)]
-            return z, [p.copy() for p in z]
-        path_arr = np.vstack(path).astype(float)
-        seg_vec = np.diff(path_arr, axis=0)
-        seg = np.linalg.norm(seg_vec, axis=1)
-        s = np.concatenate([[0.0], np.cumsum(seg)])
-        total = s[-1]
-        if total <= 1e-12:
-            p = path_arr[-1].copy()
-            return [p.copy() for _ in range(horizon)], [
-                np.zeros(2) for _ in range(horizon)
-            ]
-
-        # 当前磁珠到各路径线段的最近投影，并换算为路径弧长 s_near。
-        pos = np.asarray(pos, float)
-        best_d2, s_near = float("inf"), 0.0
-        for i, vec in enumerate(seg_vec):
-            length2 = float(vec @ vec)
-            if length2 <= 1e-12:
-                continue
-            t = float(np.clip(((pos - path_arr[i]) @ vec) / length2, 0.0, 1.0))
-            projection = path_arr[i] + t * vec
-            d2 = float(np.sum((pos - projection) ** 2))
-            if d2 < best_d2:
-                best_d2 = d2
-                s_near = float(s[i] + t * seg[i])
-        self._ref_arc = s_near
-        s0 = min(s_near + max(float(speed), 0.0) * self.period, total)
-        pts, velocities = [], []
-        for k in range(horizon):
-            sk = min(s0 + max(float(speed), 0.0) * self.period * k, total)
-            i = int(np.searchsorted(s, sk, side="right") - 1)
-            i = min(max(i, 0), len(seg) - 1)
-            t = (sk - s[i]) / max(seg[i], 1e-9)
-            pts.append(path_arr[i] + t * seg_vec[i])
-            if sk >= total - 1e-9 or seg[i] <= 1e-9:
-                velocities.append(np.zeros(2))
-            else:
-                velocities.append(float(speed) * seg_vec[i] / seg[i])
-        return pts, velocities
+        geometry = PathGeometry.from_path(path)
+        self._pending_progress = geometry.project(
+            pos,
+            self._progress,
+            fmax=self.mpc_x.fmax if self.mpc_x is not None else cfg.MPC_FMAX_UN,
+            c_drag=self._c_drag,
+            period=self.period,
+            finish_tol=self._finish_tol,
+        )
+        return geometry.reference(self._pending_progress, speed, self.period, horizon)
 
     def run(self):
         next_t = time.perf_counter()
@@ -405,7 +447,12 @@ class ControlWorker(threading.Thread):
             self._refresh_mpc(params, c_drag)
         fmax = self.mpc_x.fmax
 
-        path, speed = self.shared.get_reference()
+        path, speed, reference_version = self.shared.get_reference_snapshot()
+        if reference_version != self._reference_version:
+            self._progress = self.shared.get_progress()
+            self._ref_arc = self._progress.s_progress
+            self._reference_version = reference_version
+        self._finish_tol = float(params.get("finish_tol_mm", cfg.PATH_FINISH_TOL_MM))
         eso_d = params.get("eso_d", np.zeros(2))
         R = np.asarray(params.get("force_model_to_camera", np.eye(2)), float)
         last_sent = self.shared.get_last_sent()
@@ -425,6 +472,16 @@ class ControlWorker(threading.Thread):
         # MPC（输出水平力目标）
         t0 = time.perf_counter()
         ref, vref = self._reference_window(path, speed, pos, self.mpc_x.N)
+        if self._pending_progress.path_deviation:
+            if self.shared.report_path_deviation(
+                self._pending_progress.distance_mm,
+                input_mono=kalman_mono,
+                expected_seq=expected_seq,
+                expected_reference=reference_version,
+            ):
+                self._progress = self.shared.get_progress()
+                self._log_path_deviation(kalman_mono)
+            return
         rx = [p[0] for p in ref]
         ry = [p[1] for p in ref]
         vrx = [v[0] for v in vref]
@@ -499,11 +556,15 @@ class ControlWorker(threading.Thread):
             ref_velocity=vref[0],
             input_mono=kalman_mono,
             expected_seq=expected_seq,
+            progress=self._pending_progress,
+            expected_reference=reference_version,
         )
         if not published:
             if self.shared.get_freshness()["worker_status"] == "STALE_INPUT":
                 self._log_stale_input(kalman_mono)
             return
+        self._progress = self._pending_progress
+        self._ref_arc = self._progress.s_progress
         self.shared.append_mpc_log(
             (
                 time.time(),
@@ -578,7 +639,10 @@ class ControlWorker(threading.Thread):
                 "kalman_age_ms": max(0.0, self.clock() - kalman_mono) * 1e3,
                 "target_age_ms": self.shared.get_freshness()["target_age_s"] * 1e3,
                 "stale_status": "FRESH",
-                "s_progress": float(self._ref_arc),
+                "s_progress": self.s_progress,
+                "s_total": self.s_total,
+                "finished": self.finished,
+                "path_deviation": self._progress.path_deviation,
                 "mpc_ms": float(mpc_ms),
                 "solver_ms": float(solver_ms),
                 "mpc_cost": float(out_x["cost"] + out_y["cost"]),
@@ -619,11 +683,32 @@ class ControlWorker(threading.Thread):
         except Exception as exc:  # noqa: BLE001 -- diagnostics cannot stop the worker
             sink.fail(exc)
 
+    def _log_path_deviation(self, kalman_mono: float) -> None:
+        sink = self.shared.control_logger
+        if sink is not None and sink.recording:
+            sink.enqueue(
+                "worker",
+                {
+                    "t_mono": self.clock(),
+                    "t_wall": time.time(),
+                    "run": self.shared.control_log_run,
+                    "seq": self.shared.get_I_target()[1],
+                    "kalman_age_ms": max(0.0, self.clock() - kalman_mono) * 1e3,
+                    "target_age_ms": self.shared.get_freshness()["target_age_s"] * 1e3,
+                    "stale_status": "FRESH",
+                    "s_progress": self.s_progress,
+                    "s_total": self.s_total,
+                    "finished": self.finished,
+                    "path_deviation": True,
+                },
+            )
+
     def _log_stale_input(self, kalman_mono: float | None) -> None:
         """Log a skipped worker cycle using the unchanged target sequence."""
         sink = self.shared.control_logger
         if sink is None or not sink.recording:
             return
+        progress = self.shared.get_progress()
         sink.enqueue(
             "worker",
             {
@@ -638,6 +723,10 @@ class ControlWorker(threading.Thread):
                 ),
                 "target_age_ms": self.shared.get_freshness()["target_age_s"] * 1e3,
                 "stale_status": "STALE_INPUT",
+                "s_progress": progress.s_progress,
+                "s_total": progress.s_total,
+                "finished": progress.finished,
+                "path_deviation": progress.path_deviation,
             },
         )
 

@@ -83,6 +83,13 @@ FRICTION_V_EPS = 0.05  # 摩擦平滑速度阈值 (mm/s)
 # ---------- 路径 ----------
 PATH_SPEED_MM_S = 1.0  # 路径跟踪期望速度 (mm/s)
 PATH_DS_MM = 0.15  # 路径弧长重采样间距 (mm)
+# 路径连续投影的保守软件默认；不是实机标定的最终参数。
+PATH_BACKTRACK_MM = 0.3
+PATH_PROJ_FWD_MIN_MM = 1.0
+PATH_PROJ_FWD_FACTOR = 3.0  # forward = max(min_mm, factor * (Fmax/c) * T_mpc)
+PATH_LOCAL_PROJ_MAX_DIST_MM = 1.5
+PATH_LOST_DIST_MM = 3.0
+PATH_FINISH_TOL_MM = 0.5  # 保留 GUI spin_tol_default 原默认语义
 
 # ---------- ESO ----------
 ESO_OMEGA0 = 4.0  # 观测器带宽 (rad/s)，30Hz 下稳定裕度 fs/ω0≈7.5

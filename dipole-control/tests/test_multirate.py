@@ -147,6 +147,11 @@ def test_mpc_path_tangent_reference():
     # 同一实际位置重复求参考不能像旧 _ref_arc 那样随时间持续向前漂移。
     ref_again, _ = worker._reference_window(path, 1.0, np.array([0.0, 0.0]))
     assert np.allclose(ref_again[0], ref[0])
+    # A committed intermediate snapshot keeps this move inside the local window.
+    worker.shared.set_reference(path, 1.0, time.time())
+    worker.shared.set_params({"mpc_on": True}, time.time())
+    worker.shared.set_kalman([0.7, 0.2], [0, 0], time.time())
+    worker._step()
     moved_ref, _ = worker._reference_window(path, 1.0, np.array([1.4, 0.2]))
     assert np.allclose(moved_ref[0], [1.5, 0.0])
     # 水平路径不得像旧实现一样把 y 轴速度也错误设成 +speed。

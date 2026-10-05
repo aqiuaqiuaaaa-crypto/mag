@@ -81,6 +81,8 @@ def validate_types(records: list[dict[str, str]]) -> None:
     strings = {"mode", "estimator_mode", "eso_mode", "stale_status"}
     booleans = {
         "tracking",
+        "finished",
+        "path_deviation",
         "frame_ok",
         "detected",
         "eso_updated",

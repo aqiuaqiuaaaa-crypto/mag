@@ -1862,7 +1862,10 @@ class MagneticDipoleControl(QMainWindow):
                 "kf": "Kalman output only in KALMAN mode; state_* is active estimator output",
                 "blank": "unavailable or not executed, never substitute zero",
                 "seq": "executor-used target sequence; join worker with (run,seq)",
-                "s_progress": "existing worker nearest projection arc, mm; not a new path state",
+                "s_progress": "latest committed worker arc in mm; GUI finish/display authority, may be newer than executor seq",
+                "s_total": "total path arc including unchanged lead segment, mm",
+                "finished": "committed arc and endpoint both within original finish tolerance",
+                "path_deviation": "fresh worker projection exceeded configured path loss distance",
                 "ADC": "raw counts, latest received snapshot, monitoring only; no amp conversion",
                 "kalman_age_ms": "monotonic age of shared input; worker row uses consumed snapshot",
                 "target_age_ms": "monotonic age of executor-checked target; latest publication if executor not run",
@@ -2005,6 +2008,14 @@ class MagneticDipoleControl(QMainWindow):
                 seq = self.executor.seq
                 row.update(seq=seq, frames_since=self.executor.frames_since)
                 row.update(sink.target(self._control_log_run, seq))
+            progress = self.shared.get_progress()
+            row.update(
+                s_progress=progress.s_progress,
+                s_total=progress.s_total,
+                finished=progress.finished,
+                path_deviation=progress.path_deviation,
+                target_idx=progress.target_idx,
+            )
             diag = self.last_diag
             if diag is not None:
                 for prefix, key in (("F_est", "F_est"), ("B", "B")):
@@ -3134,10 +3145,12 @@ class MagneticDipoleControl(QMainWindow):
         self.mpc_track_step(dt)
 
     def spin_tol_default(self):
-        return 0.5
+        return cfg.PATH_FINISH_TOL_MM
 
     # ================= MPC 模式（30Hz 电流执行，10Hz MPC/MDM 在工作线程） =================
     def mpc_track_step(self, dt):
+        if not self._check_path_progress():
+            return
         if self.bead is None:
             if not self._check_control_freshness():
                 return
@@ -3150,14 +3163,6 @@ class MagneticDipoleControl(QMainWindow):
             return
         self.lost_since = None
         pos = self.state_pos_mm
-        while self.target_idx < len(self.full_path):
-            target = np.array(self.px_to_world_mm(self.full_path[self.target_idx]))
-            if np.linalg.norm(target - pos) >= self.spin_tol_default():
-                break
-            self.target_idx += 1
-        if self.target_idx >= len(self.full_path):
-            self.normal_stop()
-            return
         now = time.time()
         # 用上一帧实际执行器估计磁力更新 z3，再把最新扰动力发布给 10Hz MPC。
         if self.chk_eso.isChecked():
@@ -3221,6 +3226,21 @@ class MagneticDipoleControl(QMainWindow):
         self.traj_px.append(tuple(self.bead[:2]))
         self.traj_mm.append(tuple(self.state_pos_mm))
 
+    def _check_path_progress(self) -> bool:
+        """Read worker authority; target_idx is only a derived display value."""
+        progress = self.shared.get_progress()
+        self.target_idx = progress.target_idx
+        if progress.path_deviation:
+            self.lbl_dir.setText(
+                f"⚠ PATH_DEVIATION：偏离路径 {progress.distance_mm:.2f} mm，正常停止"
+            )
+            self.normal_stop()
+            return False
+        if progress.finished:
+            self.normal_stop()
+            return False
+        return True
+
     def _check_control_freshness(self) -> bool:
         """Minimal AUTO_TRACK gate; timeout uses the existing normal-stop ramp."""
         freshness = self.shared.get_freshness()
@@ -3260,6 +3280,7 @@ class MagneticDipoleControl(QMainWindow):
         self.shared.set_params(
             {
                 "fmax": self.spin_mpc_fmax.value(),
+                "finish_tol_mm": self.spin_tol_default(),
                 "mpc_horizon": self.spin_mpc_horizon.value(),
                 "mpc_w_pos": self.spin_mpc_w_pos.value(),
                 "mpc_w_vel": self.spin_mpc_w_vel.value(),
@@ -3334,7 +3355,10 @@ class MagneticDipoleControl(QMainWindow):
             p0 = (int(self.traj_px[i - 1][0] * sx), int(self.traj_px[i - 1][1] * sy))
             p1 = (int(self.traj_px[i][0] * sx), int(self.traj_px[i][1] * sy))
             cv2.line(disp, p0, p1, (0, 0, 255), 1)
-        if self.tracking and self.target_idx < len(self.full_path):
+        if self.tracking and self.full_path:
+            self.target_idx = min(
+                self.shared.get_progress().target_idx, len(self.full_path) - 1
+            )
             t = self.full_path[self.target_idx]
             cv2.circle(disp, (int(t[0] * sx), int(t[1] * sy)), 6, (0, 255, 255), 2)
         mpc_snapshot = None
