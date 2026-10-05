@@ -2371,29 +2371,39 @@ class MagneticDipoleControl(QMainWindow):
             self.current_F_N = np.zeros(3)
 
     # ================= 停止 =================
-    def normal_stop(self):
+    def _clear_active_modes(self, *, wait_for_worker: bool = True) -> None:
+        """Disarm tick branches and reset scan progress; keep collected records.
+
+        Emergency stop cancels the worker here, then joins it only after sending
+        the immediate zero frame. Normal stop may join here before returning.
+        """
         self.tracking = False
-        self.stopping = True
         self.dir_test_on = False
         self.calib_active = False
         self.coil_test_idx = None
+        self.coil_test_phase = "zero"
+        self.coil_test_frames = 0
+        self.coil_test_samples = 0
+        self.coil_test_vsum = np.zeros(2)
+        self.coil_test_start = None
         self.btn_dir_test.setChecked(False)
         self.btn_calib.setChecked(False)
         self.chk_cur_live.setChecked(False)
         self.chk_force_live.setChecked(False)
-        self.mode = "STOPPING"
         self.combo_constraint.setEnabled(True)
-        self._stop_worker()
+        if wait_for_worker:
+            self._stop_worker()
+        else:
+            self.shared.stop()
+
+    def normal_stop(self):
+        self.stopping = True
+        self.mode = "STOPPING"
+        self._clear_active_modes()
 
     def emergency_stop(self):
-        self.tracking = False
         self.stopping = False
-        self.dir_test_on = False
-        self.calib_active = False
-        self.btn_dir_test.setChecked(False)
-        self.btn_calib.setChecked(False)
-        self.chk_cur_live.setChecked(False)
-        self.chk_force_live.setChecked(False)
+        self._clear_active_modes(wait_for_worker=False)
         if self.ser:
             try:
                 self.ser.write(b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n")
@@ -2402,7 +2412,6 @@ class MagneticDipoleControl(QMainWindow):
                 logger.exception("急停零指令发送失败，继续停止本地控制")
         self.last_sent_cmd = [0] * 6
         self.mode = "IDLE"
-        self.combo_constraint.setEnabled(True)
         self._stop_worker()
 
     def _stop_worker(self):

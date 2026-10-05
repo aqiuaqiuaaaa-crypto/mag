@@ -2,7 +2,19 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 最新权威摘要（2026-10-05：统一控制日志，独立任务）
+## 最新权威摘要（2026-10-05：修复 stop 后 coil scan 重新通电，独立任务）
+
+- 基于 `86ec4d62f3061dfe091414b90325c59664c69963`（`feat: add unified control diagnostics logging`）。本轮仅修改停止模式清理，新增 `dipole-control/tests/test_stop_modes.py`，其余主控制链和日志基础设施不变。
+- 根因已用真实 GUI tick、合成相机及假串口复现：扫描进入 drive 并采样后输出 `a0:+50`；旧 `emergency_stop()` 虽立即发全零，但保留 `coil_test_idx=0` 和 drive 状态，下一 tick 命中 `elif self.coil_test_idx is not None`，通过原斜率层再次发送 `a0:+09`。旧 `normal_stop()` 清 idx，却未复位扫描临时状态。
+- `MagneticDipoleControl._clear_active_modes()` 是两个 stop 唯一共用的模式清理清单：`tracking=False`、`dir_test_on=False`、`calib_active=False`；`coil_test_idx=None`、`coil_test_phase="zero"`（初始化静置状态）、`coil_test_frames=0`、`coil_test_samples=0`、`coil_test_vsum=np.zeros(2)`、`coil_test_start=None`；取消 `btn_dir_test`、`btn_calib`、`chk_cur_live`、`chk_force_live` 的选中状态，重新启用 `combo_constraint`；按已有 SharedState/worker 语义停止控制线程。保留已采集的 `coil_test_records`、`calib_records`、手动设定值及标定结果；不新增模式或重构模式启动函数。
+- 停止语义保持：`normal_stop()` 设 `stopping=True`、`mode="STOPPING"` 后共用清理，不立即改命令或发帧，后续 tick 仍通过原 `send_commands()`/斜率层归零，再进入 IDLE。`emergency_stop()` 设 `stopping=False`，共用清理时只先发出 `shared.stop()` 取消信号；随后使用原 43-byte 急停全零帧和原异常处理，重置 `last_sent_cmd`、设 IDLE，再调用原 `_stop_worker()` join，避免等待线程延迟急停全零发送。未增加 heartbeat、stop 锁存或重复零帧发送。
+- 新 stop 测试 **21/21**：真实 coil drive 且已有样本时急停、六种主动模式各急停后 30 tick、六种正常停止后 30 tick 精确斜率回归、两个 stop 共用清理、急停零帧先于 join、重复 stop 保留记录/设定、真实 worker 退出，以及 stop 后 raw ADC/现有日志仍正常。急停后所有实际发送帧均为零，扫描及其余主动分支均不再调用。结合原急停写失败测试，改动的三个函数标准库行跟踪 **30/30（100%）**。
+- 对照原 checkpoint 的六模式固定输入/dt/worker 时序回放：**720 个未 stop tick、779 条实际发送帧逐位一致**，控制状态、ESO、R-L 电流估计、worker 目标亦逐位一致；随后 **180 个 normal_stop tick、27 条归零帧** 与旧正常停止流程逐位一致。源码保护确认除两个 stop 外 **125 个原 GUI 函数原文保持**，包括 tick、coil_test_step、send_commands、路径；其余 **29 个上位机文件、146 个固件文件逐字节保持**。只在 stop 后复位扫描状态、封堵旧急停重新驱动路径。
+- Ruff **0**、Black **24 files PASS**、mypy **0/24 files**；GUI smoke PASS、MPC **6/6**、multirate **18/18**、solver/protocol/safety **25/25**、CURT **132/132**、shared control **6/6**、bead simulator **8/8**、原错误路径 **46/46**、control log **25/25** 全部通过。现有 multirate 耗时测试首轮最大帧间隔 **67.1 ms** 超过原 **60 ms** 阈值，随后单独复核 **18/18**；原失败及复核输出均保留，未修改该测试、阈值或 10/30 Hz 节拍。
+- 证据位于 `artifacts/stop-mode-fix-20261005/`：`baseline-reproduction.json`、`replay-results.json`、`protection-results.json`、`coverage-results.json`、`final-results.json`（保留首轮时序失败）、`isolated-recheck-results.json`。软件验证使用合成相机/假串口；未操作实板、改动/构建/烧写固件。MPC/ESO/solver/CurrentExecutor/R-L/协议/command slew/路径/watchdog/freshness 均未修改；ADC 仍只是 raw 监测，95/46 列控制/worker 日志字段不变。
+- 用户明确授权验证通过后建立唯一独立 checkpoint：`fix: prevent coil scan restart after stop`（本条所在提交），不 push。仅提交 GUI 停止清理、新增 stop 测试和本记忆，artifacts 不纳入提交。
+
+## 历史摘要（2026-10-05：统一控制日志，独立任务）
 
 - 基于 `19c1017792a3a79a200965424d2455da91391fa5`（`refactor: harden Python error handling and lint clean`），本轮仅增加统一日志。GUI 新增“控制日志”页、“开始记录 / 停止记录”，默认关闭，不改变原实验启动流程。
 - 新增 `dipole-control/control_log.py`：2048 行有界队列、put_nowait、独立写盘线程；队列满只累计 dropped 并继续，写盘失败只结束日志并在 GUI 显示错误，不停止追踪/worker/串口。会话 CSV、worker CSV、metadata、summary 全部独占创建、不覆盖。SharedState 仅增加日志观察接口及 128 项有界目标关联缓存。
