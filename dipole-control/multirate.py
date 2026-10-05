@@ -26,9 +26,16 @@ import copy
 import math
 import threading
 import time
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import config as cfg
 import numpy as np
+from control_log import ControlLogger, Scalar
+from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from mpc import ForceMPC
 
 
 class SharedState:
@@ -70,6 +77,16 @@ class SharedState:
         self._mpc_log = []  # 10Hz 事件日志
         self._solver_error = None
         self._stop = threading.Event()
+        # Optional observation only; never consumed by a control calculation.
+        self.control_logger: ControlLogger | None = None
+        self.control_log_run = 0
+
+    def attach_control_log(self, sink: ControlLogger | None, run: int) -> None:
+        with self._lock:
+            self.control_logger = sink
+            self.control_log_run = run
+            if sink is not None:
+                sink.remember_target(run, self._I_target["seq"], self._I_target)
 
     # ---- 主线程 → 工作线程 ----
     def set_kalman(self, pos, vel, t):
@@ -152,6 +169,10 @@ class SharedState:
                     np.zeros(2) if ref_velocity is None else ref_velocity, float
                 ).copy(),
             }
+            if self.control_logger is not None:
+                self.control_logger.remember_target(
+                    self.control_log_run, seq, self._I_target
+                )
 
     def get_I_target(self):
         with self._lock:
@@ -302,7 +323,7 @@ class ControlWorker(threading.Thread):
             self._refresh_mpc(params, c_drag)
         fmax = self.mpc_x.fmax
 
-        pos, _vel, _ = self.shared.get_kalman()
+        pos, _vel, kalman_t = self.shared.get_kalman()
         path, speed = self.shared.get_reference()
         eso_d = params.get("eso_d", np.zeros(2))
         R = np.asarray(params.get("force_model_to_camera", np.eye(2)), float)
@@ -425,6 +446,95 @@ class ControlWorker(threading.Thread):
                 *(int(c) for c in rec["commands"]),
             )
         )
+        if self.shared.control_logger is not None:
+            self._log_control_worker(
+                kalman_t,
+                pos,
+                eso_d,
+                F_prev_camera,
+                F_target,
+                ref,
+                vref,
+                mpc_ms,
+                solver_ms,
+                out_x,
+                out_y,
+                ferr,
+                rec,
+                params,
+            )
+
+    def _log_control_worker(
+        self,
+        kalman_t: float,
+        pos: NDArray[np.float64],
+        eso_d: NDArray[np.float64],
+        f_prev: NDArray[np.float64],
+        f_target: NDArray[np.float64],
+        ref: Sequence[NDArray[np.float64]],
+        vref: Sequence[NDArray[np.float64]],
+        mpc_ms: float,
+        solver_ms: float,
+        out_x: dict[str, Any],
+        out_y: dict[str, Any],
+        ferr: float,
+        rec: dict[str, Any],
+        params: dict[str, Any],
+    ) -> None:
+        """Copy already computed values; diagnostics faults cannot stop the worker."""
+        sink = self.shared.control_logger
+        if sink is None or not sink.recording:
+            return
+        try:
+            mpc = cast("ForceMPC", self.mpc_x)
+            _, seq, _, _ = self.shared.get_I_target()
+            run = self.shared.control_log_run
+            row: dict[str, Scalar] = {
+                "t_mono": time.monotonic(),
+                "t_wall": time.time(),
+                "run": run,
+                "seq": seq,
+                "kalman_age_ms": (time.time() - kalman_t) * 1e3 if kalman_t else None,
+                "s_progress": float(self._ref_arc),
+                "mpc_ms": float(mpc_ms),
+                "solver_ms": float(solver_ms),
+                "mpc_cost": float(out_x["cost"] + out_y["cost"]),
+                "horizon": int(mpc.N),
+                "w_pos": float(mpc.wp),
+                "w_vel": float(mpc.wv),
+                "w_u": float(mpc.wu),
+                "w_du": float(mpc.wd),
+                "fmax": float(mpc.fmax),
+                "max_cmd": int(params.get("max_cmd", cfg.CMD_MAX)),
+                "force_error_uN": float(ferr),
+            }
+            for prefix, vector in (
+                ("x0", pos),
+                ("d_used", eso_d),
+                ("F_prev", f_prev),
+                ("F_target", f_target),
+                ("ref", ref[0]),
+                ("vref", vref[0]),
+            ):
+                for axis, value in zip(("x", "y", "z"), vector):
+                    row[f"{prefix}_{axis}"] = float(value)
+            for key in (
+                "converged",
+                "current_constraint_active",
+                "field_constraint_active",
+                "direction_constraint_active",
+                "sparse_infeasible",
+                "current_bound_ok",
+                "slew_ok",
+            ):
+                row[key] = bool(rec[key]) if key in rec else None
+            if "actuation_condition" in rec:
+                row["actuation_condition"] = float(rec["actuation_condition"])
+            row.update(sink.target(run, seq))
+            sink.remember_progress(run, seq, float(self._ref_arc))
+            sink.enqueue("worker", row)
+        except Exception as exc:  # noqa: BLE001 -- diagnostics cannot stop the worker
+            sink.fail(exc)
 
     def _drag_c(self, params):
         """µN/(mm/s)——由黏度与珠径计算（与 dipole_solver.drag_uN_per_mm_s 同式）"""

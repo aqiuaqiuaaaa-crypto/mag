@@ -38,6 +38,7 @@ except ImportError:
 import config as cfg
 import friction_model as fm
 from adc_csv import ADCLogger
+from control_log import ControlLogger, Scalar
 from curt_telemetry import ADCSnapshot, ADCStreamDecoder
 from dipole_solver import DipoleSolver
 from estimators import ESO1D, KalmanFilter2D
@@ -299,6 +300,8 @@ class MagneticDipoleControl(QMainWindow):
     adc_snapshot: ADCSnapshot | None
     adc_received_at: float | None
     adc_logger: ADCLogger | None
+    control_logger: ControlLogger | None
+    _control_tick_row: dict[str, Scalar] | None
     spin_mpc_w_pos: QDoubleSpinBox
     spin_mpc_w_vel: QDoubleSpinBox
     spin_mpc_w_u: QDoubleSpinBox
@@ -377,6 +380,11 @@ class MagneticDipoleControl(QMainWindow):
         self.controller_ms = 0.0
         self.serial_ms = 0.0
         self.total_ms = 0.0
+        self.control_logger = None
+        self._control_tick_row = None
+        self._control_tick_count = 0
+        self._control_log_run = 0
+        self.control_log_capture_ms = 0.0
 
         # 模型 XY 坐标到相机/路径世界坐标的正交映射。它只修正安装旋转、
         # 相机镜像和通道命名差异，不替代 180 偶极子正向/逆向模型。
@@ -420,6 +428,7 @@ class MagneticDipoleControl(QMainWindow):
         self.adc_status_timer = QTimer(self)
         self.adc_status_timer.setInterval(100)
         self.adc_status_timer.timeout.connect(self._refresh_adc_display)
+        self.adc_status_timer.timeout.connect(self._refresh_control_log_status)
         self.solver = None
         self.model_ok = False
         self.model_err = ""
@@ -534,6 +543,7 @@ class MagneticDipoleControl(QMainWindow):
         self.tabs.addTab(self._tab_advanced(), "高级控制")
         self.tabs.addTab(self._tab_diag(), "诊断")
         self.tabs.addTab(self._tab_physics(), "物理参数")
+        self.tabs.addTab(self._tab_control_log(), "控制日志")
         self.tabs.addTab(self._tab_adc(), "CURT / ADC")
         self.tabs.setMinimumWidth(400)
         self.control_scroll = QScrollArea()
@@ -1732,6 +1742,277 @@ class MagneticDipoleControl(QMainWindow):
                 f"{elapsed:.1f} 秒 / {self.record_frame_count} 帧"
             )
 
+    # ================= 统一控制日志（仅观察，不进入控制计算） =================
+    def _tab_control_log(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        text = QLabel(
+            "统一时间轴控制日志（约 30 Hz），默认关闭。\n"
+            "记录控制 CSV、worker CSV、参数 metadata 和计数 summary。\n"
+            "ADC 仅记录 raw；写盘失败不会停止控制。"
+        )
+        text.setWordWrap(True)
+        layout.addWidget(text)
+        self.edit_control_log = QLineEdit()
+        self.edit_control_log.setReadOnly(True)
+        self.edit_control_log.setPlaceholderText("选择新的控制日志 CSV")
+        layout.addWidget(self.edit_control_log)
+        self.btn_control_log_path = QPushButton("选择记录文件…")
+        self.btn_control_log_path.clicked.connect(self.choose_control_log)
+        layout.addWidget(self.btn_control_log_path)
+        self.btn_control_log_start = QPushButton("开始记录")
+        self.btn_control_log_start.clicked.connect(self.start_control_log)
+        layout.addWidget(self.btn_control_log_start)
+        self.btn_control_log_stop = QPushButton("停止记录")
+        self.btn_control_log_stop.setEnabled(False)
+        self.btn_control_log_stop.clicked.connect(self.stop_control_log)
+        layout.addWidget(self.btn_control_log_stop)
+        self.lbl_control_log = QLabel("控制日志：未开始")
+        self.lbl_control_log.setWordWrap(True)
+        layout.addWidget(self.lbl_control_log)
+        layout.addStretch()
+        return tab
+
+    def choose_control_log(self) -> None:
+        name = datetime.now(timezone.utc).strftime("control_%Y%m%d_%H%M%S_%f.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "选择控制 CSV（不覆盖已有会话文件）", name, "CSV (*.csv)"
+        )
+        if path:
+            self.edit_control_log.setText(path)
+
+    def _control_log_metadata(self) -> dict[str, object]:
+        settings = {
+            key: (
+                [self._widget_get(w) for w in item]
+                if isinstance(item, list)
+                else self._widget_get(item)
+            )
+            for key, item in self._settings_items().items()
+        }
+        return {
+            "started_wall_utc": datetime.now(timezone.utc).isoformat(),
+            "started_mono": time.monotonic(),
+            "gui": settings,
+            "config": {key: value for key, value in vars(cfg).items() if key.isupper()},
+            "physics": dict(
+                self._phys_params,
+                viscosity_mPas=self.viscosity_mPas,
+                R_coil_ohm=cfg.R_COIL_OHM,
+                L_coil_h=cfg.L_COIL_H,
+            ),
+            "R_force_model_to_camera": self.force_model_to_camera.tolist(),
+            "offset": {
+                "position_mm": [0, 0, 0],
+                "adc_raw": [0] * 6,
+                "source": "0/default; no additional offset calibration applied",
+                "pixel_origin": [self.frame_size[0] / 2, self.frame_size[1] / 2],
+            },
+            "frame_size_px": list(self.frame_size),
+            "mpc_weights": {
+                key: settings[key]
+                for key in ("mpc_w_pos", "mpc_w_vel", "mpc_w_u", "mpc_w_du")
+            },
+            "B_target": {
+                "direction_gui": [settings[f"field_dir_{a}"] for a in "xyz"],
+                "magnitude_mT": settings["field_magnitude_mT"],
+            },
+            "path": {
+                "path_px": [list(p) for p in self.path_px],
+                "full_path_px": [list(p) for p in self.full_path],
+                "speed_mm_s": self.spin_path_speed.value(),
+                "ds_mm": self.spin_path_ds.value(),
+                "target_idx": self.target_idx,
+            },
+            "limits": {
+                "max_cmd": self._current_cmd_limit(),
+                "cmd_abs": cfg.CMD_MAX,
+                "max_delta_cmd": cfg.MAX_DELTA_CMD,
+                "max_current_A": cfg.MAX_CURRENT_A,
+                "current_gain_A_per_cmd": (
+                    self.solver.current_gain if self.solver else None
+                ),
+            },
+            "modes": {
+                "mode": self.mode,
+                "tracking": self.tracking,
+                "estimator": self.combo_estimator.currentText(),
+                "eso": self.chk_eso.isChecked(),
+                "lift": self.chk_lift.isChecked(),
+                "constraint": self.combo_constraint.currentText(),
+            },
+            "semantics": {
+                "t_wall": "Unix seconds; wall clock, not the control timeline",
+                "t_mono": "time.monotonic seconds at tick/worker observation",
+                "dt_ms": "existing clamped wall-clock control dt, unchanged",
+                "total_ms": "existing control-cycle timing before render/status/log capture",
+                "serial_ms": "existing last send_commands duration; held if no send this tick",
+                "forces": "micro-newtons, camera/world coordinates",
+                "B": "tesla, camera/world coordinates; executor RL model, held if not updated",
+                "I_est": "RL estimate in amperes, held if executor not updated",
+                "kf": "Kalman output only in KALMAN mode; state_* is active estimator output",
+                "blank": "unavailable or not executed, never substitute zero",
+                "seq": "executor-used target sequence; join worker with (run,seq)",
+                "s_progress": "existing worker nearest projection arc, mm; not a new path state",
+                "ADC": "raw counts, latest received snapshot, monitoring only; no amp conversion",
+                "kalman_age_ms": "existing wall-clock snapshot age at worker completion; diagnostic only",
+                "cmd_sent": "final safety-layer command state; not a hardware delivery acknowledgement",
+                "dropped": "cumulative queue overflows across both streams before this row",
+            },
+        }
+
+    def _attach_control_log(self) -> None:
+        self._control_log_run += 1
+        self.shared.attach_control_log(self.control_logger, self._control_log_run)
+
+    def start_control_log(self) -> None:
+        if (
+            self.control_logger is not None
+            and not self.control_logger.finished.is_set()
+        ):
+            return
+        if not self.edit_control_log.text():
+            self.choose_control_log()
+        if not self.edit_control_log.text():
+            return
+        try:
+            self.control_logger = ControlLogger(
+                Path(self.edit_control_log.text()), self._control_log_metadata()
+            )
+            self._attach_control_log()
+        except Exception as exc:  # noqa: BLE001 -- isolate logging
+            self.lbl_control_log.setText(f"日志错误：{type(exc).__name__}: {exc}")
+            return
+        self.btn_control_log_start.setEnabled(False)
+        self.btn_control_log_path.setEnabled(False)
+        self.btn_control_log_stop.setEnabled(True)
+        self._refresh_control_log_status()
+
+    def stop_control_log(self) -> None:
+        if self.control_logger is not None:
+            self.control_logger.request_stop()
+        self.shared.attach_control_log(None, self._control_log_run)
+        self._refresh_control_log_status()
+
+    def _refresh_control_log_status(self) -> None:
+        sink = self.control_logger
+        if sink is None:
+            return
+        stats = sink.stats()
+        state = (
+            f"日志错误：{sink.error}"
+            if sink.error
+            else (
+                "已停止"
+                if sink.finished.is_set()
+                else "记录中" if sink.recording else "正在排空"
+            )
+        )
+        self.lbl_control_log.setText(
+            f"控制日志：{state}\n"
+            f"tick={stats['control']['attempted']} 写入={stats['control']['written']} "
+            f"worker={stats['worker']['written']} dropped={sink.dropped}\n"
+            f"未写入={stats['control']['accepted'] - stats['control']['written']} "
+            f"拒收={stats['control']['rejected']}\n{sink.path}"
+        )
+        done = sink.finished.is_set()
+        self.btn_control_log_start.setEnabled(done)
+        self.btn_control_log_path.setEnabled(done)
+        self.btn_control_log_stop.setEnabled(not done)
+
+    def _begin_control_log_tick(self, now: float, dt: float) -> None:
+        self._control_tick_count += 1
+        self._control_tick_row = None
+        sink = self.control_logger
+        if sink is not None and sink.recording:
+            self._control_tick_row = {
+                "t_mono": time.monotonic(),
+                "t_wall": now,
+                "tick": self._control_tick_count,
+                "dt_ms": dt * 1e3,
+                "eso_updated": False,
+                "executor_updated": False,
+            }
+
+    def _finish_control_log_tick(self, detected: bool) -> None:
+        row, sink = self._control_tick_row, self.control_logger
+        if row is None or sink is None:
+            return
+        start = time.perf_counter()
+        try:
+            row.update(
+                jitter_ms=self.loop_jitter_ms,
+                total_ms=self.total_ms,
+                vision_ms=self.vision_ms,
+                estimator_ms=self.estimator_ms,
+                controller_ms=self.controller_ms,
+                serial_ms=self.serial_ms,
+                mode=self.mode,
+                tracking=self.tracking,
+                frame_ok=self.frame is not None,
+                detected=detected,
+                estimator_mode=self.combo_estimator.currentText(),
+                eso_mode="ON" if self.chk_eso.isChecked() else "OFF",
+                d_hat_x=float(self.z3[0]),
+                d_hat_y=float(self.z3[1]),
+                target_idx=self.target_idx,
+                max_cmd=self._current_cmd_limit(),
+                serial_connected=self.ser is not None,
+                run=self._control_log_run,
+            )
+            if self.bead is not None:
+                row.update(
+                    px_x=float(self.bead[0]),
+                    px_y=float(self.bead[1]),
+                    area_px=float(self.bead[2]),
+                )
+            row["state_x_mm"], row["state_y_mm"] = map(float, self.state_pos_mm)
+            row["state_vx_mm_s"], row["state_vy_mm_s"] = map(float, self.state_vel_mm)
+            if self.combo_estimator.currentText() == "KALMAN":
+                row["kf_x"], row["kf_y"] = map(float, self.state_pos_mm)
+                row["kf_vx"], row["kf_vy"] = map(float, self.state_vel_mm)
+            for i, value in enumerate(self.last_sent_cmd):
+                row[f"cmd_sent_a{i}"] = int(value)
+            for i, value in enumerate(self.executor.I_est):
+                row[f"I_est_{i}"] = float(value)
+            if self.executor.seq >= 0:
+                seq = self.executor.seq
+                row.update(seq=seq, frames_since=self.executor.frames_since)
+                row.update(sink.target(self._control_log_run, seq))
+            diag = self.last_diag
+            if diag is not None:
+                for prefix, key in (("F_est", "F_est"), ("B", "B")):
+                    for axis, value in zip("xyz", diag[key]):
+                        row[f"{prefix}_{axis}"] = float(value) * (
+                            1e6 if prefix == "F_est" else 1
+                        )
+                row.update(
+                    B_mag_mT=float(diag["Bmag_mT"]),
+                    align_ratio=float(diag["ratio"]),
+                    low_field=bool(diag["low_field"]),
+                )
+            snapshot = self.adc_snapshot
+            if snapshot is not None:
+                row.update(
+                    adc_frame_count=snapshot.frame_count,
+                    adc_age_ms=(
+                        (time.monotonic() - self.adc_received_at) * 1e3
+                        if self.adc_received_at is not None
+                        else None
+                    ),
+                    adc_valid=snapshot.valid,
+                    adc_running=snapshot.running,
+                    adc_error_flags=snapshot.error_flags,
+                )
+                for i, raw in enumerate(snapshot.raw):
+                    row[f"raw{i}"] = raw
+            sink.enqueue("control", row)
+        except Exception as exc:  # noqa: BLE001 -- diagnostics are an isolated boundary
+            sink.fail(exc)
+        finally:
+            self.control_log_capture_ms = (time.perf_counter() - start) * 1e3
+            self._control_tick_row = None
+
     # ================= CURT 只读监视（不进入控制状态或反馈） =================
     def _tab_adc(self) -> QWidget:
         """Build raw ADC and health displays in unchanged logical channel order."""
@@ -2312,6 +2593,8 @@ class MagneticDipoleControl(QMainWindow):
         self.shared.set_solver_error(None)
         self.executor = CurrentExecutor()
         self.worker = ControlWorker(self.shared, self.solver)
+        if self.control_logger is not None and self.control_logger.recording:
+            self._attach_control_log()
         self.worker.start()
 
     def _reset_controllers(self):
@@ -2484,6 +2767,8 @@ class MagneticDipoleControl(QMainWindow):
                 p, v = self.state_pos_mm, self.ema_vel
         self.state_pos_mm = np.asarray(p, float)
         self.state_vel_mm = np.asarray(v, float)
+        if self._control_tick_row is not None and z is not None:
+            self._control_tick_row.update(meas_x_mm=float(z[0]), meas_y_mm=float(z[1]))
 
     # ================= 主循环（≈30Hz, dt 实测） =================
     def tick(self):
@@ -2495,6 +2780,8 @@ class MagneticDipoleControl(QMainWindow):
         now = time.time()
         dt = min(0.2, max(0.005, now - self.last_time))
         self.last_time = now
+
+        self._begin_control_log_tick(now, dt)
 
         # 1-2. 相机 + 检测
         t0 = time.perf_counter()
@@ -2579,6 +2866,7 @@ class MagneticDipoleControl(QMainWindow):
 
         self.render(mask)
         self.update_status(dt)
+        self._finish_control_log_tick(detected)
 
     # ================= 方向测试 =================
     def direction_test_step(self):
@@ -2771,6 +3059,12 @@ class MagneticDipoleControl(QMainWindow):
             u_xy_uN = np.asarray(self.last_F_actual[:2], float) * 1e6
             self.z3[0] = self.eso_x.step(dt, pos[0], u_xy_uN[0])
             self.z3[1] = self.eso_y.step(dt, pos[1], u_xy_uN[1])
+            if self._control_tick_row is not None:
+                self._control_tick_row.update(
+                    eso_updated=True,
+                    u_eso_x=float(u_xy_uN[0]),
+                    u_eso_y=float(u_xy_uN[1]),
+                )
         else:
             self.z3[:] = 0.0
         self.shared.set_kalman(pos, self.state_vel_mm, now)
@@ -2796,6 +3090,12 @@ class MagneticDipoleControl(QMainWindow):
         self.shared.set_last_sent(self.last_sent_cmd)
         self.last_F_actual = diag["F_est"].copy()
         self.last_diag = diag
+        if self._control_tick_row is not None:
+            self._control_tick_row.update(
+                executor_updated=True, alpha=float(diag["interp_alpha"])
+            )
+            for i, value in enumerate(diag["cmd"]):
+                self._control_tick_row[f"cmd_exec_a{i}"] = int(value)
         _, _, _, target_snapshot = self.shared.get_I_target()
         if target_snapshot.get("rec") is not None:
             self.last_solver_rec = target_snapshot["rec"]
@@ -3245,6 +3545,9 @@ class MagneticDipoleControl(QMainWindow):
             self.ser.close()
         if self.adc_logger is not None:
             self.adc_logger.wait_closed()
+        self.stop_control_log()
+        if self.control_logger is not None:
+            self.control_logger.wait_closed()
         super().closeEvent(e)
 
 

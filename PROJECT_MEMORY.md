@@ -2,6 +2,19 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-05：统一控制日志，独立任务）
+
+- 基于 `19c1017792a3a79a200965424d2455da91391fa5`（`refactor: harden Python error handling and lint clean`），本轮仅增加统一日志。GUI 新增“控制日志”页、“开始记录 / 停止记录”，默认关闭，不改变原实验启动流程。
+- 新增 `dipole-control/control_log.py`：2048 行有界队列、put_nowait、独立写盘线程；队列满只累计 dropped 并继续，写盘失败只结束日志并在 GUI 显示错误，不停止追踪/worker/串口。会话 CSV、worker CSV、metadata、summary 全部独占创建、不覆盖。SharedState 仅增加日志观察接口及 128 项有界目标关联缓存。
+- 控制 CSV 95 列、每 tick 一行，time.monotonic 为主时间轴，保留 wall-clock；直接快照视觉、测量/估计、ESO、路径参考、目标、执行命令、R-L/磁场磁力模型及 raw ADC。worker CSV 46 列，通过执行器实际使用的 `(run,seq)` 关联；s_progress 只读取已有 `_ref_arc`，kalman_age 只读取已有 wall-clock 时间信息，没有实施路径修复或 freshness。
+- metadata 保存开始时 GUI/config、实际 MPC 权重、物理参数、电阻/电感、R、0/default offset、B 目标、路径、限制和模式，以及 Git commit / tracked dirty。字段、单位、持有值/空值语义、正常结束计数及失败边界见 `dipole-control/CONTROL_LOG.md`。
+- 源码保护与固定输入/dt/worker 时序三方回放证明：原 checkpoint / 当前日志 OFF / 当前日志 ON，150 tick、144 条实际发送的 43-byte 帧及控制状态/ESO/R-L/worker 目标逐位相同。CurrentExecutor（含 R-L）、send_commands/protocol/safety、急停、路径函数原文保持；现有计算移除纯日志观察语句后 AST 保持；MPC、solver、estimators、friction、config、原有测试和 146 个固件文件字节保持。ADC 仅 raw 监测，未接入电流 PI。
+- 新增日志测试 25/25。性能：AUTO_TRACK 60 tick 快照入队中位 0.0723 ms、完整 tick 配对中位增量 0.0143 ms；手动电流 240 tick 对应 0.0531 / 0.1059 ms，快照最大 0.1082 ms；均达到中位额外开销 <1 ms。结果来自合成相机/假串口，未操作实板。
+- Ruff 0、Black 23 files、mypy 0/23 files，新模块 --strict 通过；GUI smoke、MPC 6/6、multirate 18/18、solver/protocol/safety 25/25、CURT 132/132、shared control 6/6、bead simulator 8/8、原错误路径 46/46 通过。multirate 原时序测试前两次最大帧间隔 67.1/62.1 ms 超过原 60 ms 阈值，失败日志保留；随后原 checkpoint 和当前代码单独测试均 18/18，未改测试/阈值/控制节拍。新日志模块标准库线程行跟踪 294/296（99.32%）。
+- 软件验证、原 checkpoint 回放、源码保护、统计与 diff/status 证据保存在 `artifacts/unified-control-log-20261005/`；artifacts 不纳入提交。本轮用户明确授权验证通过后建立唯一独立 checkpoint：`feat: add unified control diagnostics logging`（本条所在提交），不 push。
+
+> 早期摘要和计划保留为历史；本轮未处理 ESO、MPC、坐标系、路径、solver、watchdog、freshness、STM32 或六路电流 PI。当前控制链及实板事实承接上一 checkpoint。
+
 ## 最新权威摘要（2026-10-04：中断恢复后 Ruff 清零，独立代码质量 checkpoint）
 
 - 恢复时 HEAD 仍为类型 checkpoint `65fad950a092299af602e69f1e092a32795fb030`；暂存区为空。已有 16 个 tracked 文件的未提交修改和 untracked artifacts 原样保留，并在 `artifacts/code-quality-20261004/ruff-zero/recovered/` 保存恢复快照、完整 diff 与 SHA-256。
