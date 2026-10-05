@@ -19,6 +19,7 @@ FRAME_W = 1920  # 1080p
 FRAME_H = 1080
 VIEW_WIDTH_MM = 20.0  # 画面实际宽度 2cm
 DISP_W, DISP_H = 960, 540  # GUI 显示分辨率
+FRAME_OFFSET_MM = (0.0, 0.0)  # 模型原点在相机世界 XY 中的位置；待实机标定，默认 0
 
 # ---------- 控制 ----------
 CONTROL_HZ = 30  # 目标控制频率

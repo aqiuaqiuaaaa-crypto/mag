@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any, cast
 import config as cfg
 import numpy as np
 from control_log import ControlLogger, Scalar
+from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from numpy.typing import NDArray
 
 if TYPE_CHECKING:
@@ -129,6 +130,9 @@ class SharedState:
             p["eso_d"] = np.array(self._params.get("eso_d", np.zeros(2)), float)
             p["force_model_to_camera"] = np.array(
                 self._params.get("force_model_to_camera", np.eye(2)), float
+            ).copy()
+            p["frame_offset_mm"] = np.array(
+                self._params.get("frame_offset_mm", cfg.FRAME_OFFSET_MM), float
             ).copy()
             p["field_direction"] = np.array(
                 self._params.get("field_direction", cfg.CONTROL_FIELD_DIRECTION), float
@@ -328,7 +332,7 @@ class ControlWorker(threading.Thread):
         eso_d = params.get("eso_d", np.zeros(2))
         R = np.asarray(params.get("force_model_to_camera", np.eye(2)), float)
         last_sent = self.shared.get_last_sent()
-        pos_m = np.array([pos[0], pos[1], 0.0]) * 1e-3
+        pos_m = cam_to_model_pos(pos, R, params["frame_offset_mm"])
         # ΔF 项从实际发送整数指令对应的磁力开始，而不是从上一次理想 MPC
         # 目标开始；这样 10Hz 预测与 30Hz 插值/斜率执行层保持一致。
         F_prev_model = (
@@ -339,8 +343,7 @@ class ControlWorker(threading.Thread):
             )
             * 1e6
         )
-        F_prev_camera = F_prev_model.copy()
-        F_prev_camera[:2] = R @ F_prev_model[:2]
+        F_prev_camera = model_to_cam_vec(F_prev_model, R)
 
         # MPC（输出水平力目标）
         t0 = time.perf_counter()
@@ -357,13 +360,11 @@ class ControlWorker(threading.Thread):
         fxy_norm = float(np.linalg.norm(F_target[:2]))
         if fxy_norm > fmax:
             F_target[:2] *= fmax / fxy_norm
-        F_target_model = F_target.copy()
-        F_target_model[:2] = R.T @ F_target[:2]
+        F_target_model = cam_to_model_vec(F_target, R)
         B_direction_camera = np.asarray(
             params.get("field_direction", cfg.CONTROL_FIELD_DIRECTION), float
         )
-        B_direction_model = B_direction_camera.copy()
-        B_direction_model[:2] = R.T @ B_direction_camera[:2]
+        B_direction_model = cam_to_model_vec(B_direction_camera, R)
         mpc_ms = (time.perf_counter() - t0) * 1e3
 
         # MDM 逆解（约束在解算器内部；cmd_prev 用 30Hz 层实际发送指令）
@@ -390,18 +391,15 @@ class ControlWorker(threading.Thread):
                 continue
             f_model = np.asarray(rec[key], float).copy()
             rec[key + "_model"] = f_model.copy()
-            rec[key] = f_model.copy()
-            rec[key][:2] = R @ f_model[:2]
+            rec[key] = model_to_cam_vec(f_model, R)
         if "B" in rec:
             b_model = np.asarray(rec["B"], float).copy()
             rec["B_model"] = b_model.copy()
-            rec["B"] = b_model.copy()
-            rec["B"][:2] = R @ b_model[:2]
+            rec["B"] = model_to_cam_vec(b_model, R)
         if rec.get("requested_B_direction") is not None:
             bd_model = np.asarray(rec["requested_B_direction"], float).copy()
             rec["requested_B_direction_model"] = bd_model.copy()
-            rec["requested_B_direction"] = bd_model.copy()
-            rec["requested_B_direction"][:2] = R @ bd_model[:2]
+            rec["requested_B_direction"] = model_to_cam_vec(bd_model, R)
         rec["requested_force_camera"] = F_target * 1e-6
 
         # 力回代验证（对 I_target 而非内部候选）

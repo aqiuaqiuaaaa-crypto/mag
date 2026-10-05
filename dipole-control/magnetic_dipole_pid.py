@@ -44,6 +44,7 @@ from control_log import ControlLogger, Scalar
 from curt_telemetry import ADCSnapshot, ADCStreamDecoder
 from dipole_solver import DipoleSolver
 from estimators import ESO1D, KalmanFilter2D
+from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from multirate import ControlWorker, CurrentExecutor, SharedState
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
@@ -395,6 +396,7 @@ class MagneticDipoleControl(QMainWindow):
         # 模型 XY 坐标到相机/路径世界坐标的正交映射。它只修正安装旋转、
         # 相机镜像和通道命名差异，不替代 180 偶极子正向/逆向模型。
         self.force_model_to_camera = np.eye(2)
+        self.frame_offset_mm = np.array(cfg.FRAME_OFFSET_MM, float)
         self.force_frame_calibrated = False
         self.force_frame_rms_deg = float("nan")
 
@@ -826,11 +828,9 @@ class MagneticDipoleControl(QMainWindow):
         转回模型坐标。这样保留多偶极子物理模型，同时修正安装和相机坐标差异。
         """
         requested_camera = np.asarray(force_N, float).copy()
-        force_model = requested_camera.copy()
-        force_model[:2] = self.force_model_to_camera.T @ requested_camera[:2]
+        force_model = cam_to_model_vec(requested_camera, self.force_model_to_camera)
         field_camera, field_magnitude = self._field_target_camera()
-        field_model = field_camera.copy()
-        field_model[:2] = self.force_model_to_camera.T @ field_camera[:2]
+        field_model = cam_to_model_vec(field_camera, self.force_model_to_camera)
         rec = self.solver.solve_field_force_pseudoinverse(
             pos_m,
             force_model,
@@ -847,32 +847,27 @@ class MagneticDipoleControl(QMainWindow):
         if "achieved_force" in rec:
             f_model = np.asarray(rec["achieved_force"], float).copy()
             rec["achieved_force_model"] = f_model.copy()
-            f_camera = f_model.copy()
-            f_camera[:2] = R @ f_model[:2]
+            f_camera = model_to_cam_vec(f_model, R)
             rec["achieved_force"] = f_camera
         if "achieved_force_nonlinear" in rec:
             f_nl_model = np.asarray(rec["achieved_force_nonlinear"], float).copy()
             rec["achieved_force_nonlinear_model"] = f_nl_model.copy()
-            f_nl_camera = f_nl_model.copy()
-            f_nl_camera[:2] = R @ f_nl_model[:2]
+            f_nl_camera = model_to_cam_vec(f_nl_model, R)
             rec["achieved_force_nonlinear"] = f_nl_camera
         if "achieved_force_linear" in rec:
             f_lin_model = np.asarray(rec["achieved_force_linear"], float).copy()
             rec["achieved_force_linear_model"] = f_lin_model.copy()
-            f_lin_camera = f_lin_model.copy()
-            f_lin_camera[:2] = R @ f_lin_model[:2]
+            f_lin_camera = model_to_cam_vec(f_lin_model, R)
             rec["achieved_force_linear"] = f_lin_camera
         if "B" in rec:
             b_model = np.asarray(rec["B"], float).copy()
             rec["B_model"] = b_model.copy()
-            b_camera = b_model.copy()
-            b_camera[:2] = R @ b_model[:2]
+            b_camera = model_to_cam_vec(b_model, R)
             rec["B"] = b_camera
         if rec.get("requested_B_direction") is not None:
             requested_b_model = np.asarray(rec["requested_B_direction"], float).copy()
             rec["requested_B_direction_model"] = requested_b_model.copy()
-            requested_b_camera = requested_b_model.copy()
-            requested_b_camera[:2] = R @ requested_b_model[:2]
+            requested_b_camera = model_to_cam_vec(requested_b_model, R)
             rec["requested_B_direction"] = requested_b_camera
         if requested_force_camera is not None:
             req = np.asarray(requested_force_camera, float).copy()
@@ -892,7 +887,7 @@ class MagneticDipoleControl(QMainWindow):
             if key in out:
                 vec = np.asarray(out[key], float).copy()
                 if vec.size >= 2:
-                    vec[:2] = self.force_model_to_camera @ vec[:2]
+                    vec = model_to_cam_vec(vec, self.force_model_to_camera)
                 out[key] = vec
         return out
 
@@ -1815,9 +1810,9 @@ class MagneticDipoleControl(QMainWindow):
             ),
             "R_force_model_to_camera": self.force_model_to_camera.tolist(),
             "offset": {
-                "position_mm": [0, 0, 0],
+                "position_mm": [*self.frame_offset_mm.tolist(), 0.0],
                 "adc_raw": [0] * 6,
-                "source": "0/default; no additional offset calibration applied",
+                "source": "config.FRAME_OFFSET_MM; camera XY of model origin; default 0, uncalibrated",
                 "pixel_origin": [self.frame_size[0] / 2, self.frame_size[1] / 2],
             },
             "frame_size_px": list(self.frame_size),
@@ -2428,10 +2423,8 @@ class MagneticDipoleControl(QMainWindow):
             out = self.solver.forward_model(self._bead_pos_m(), currents)
             b_model = np.asarray(out["B"], float).copy()
             f_model = np.atleast_1d(out["F"]).astype(float, copy=True)
-            self.current_B_T = b_model.copy()
-            self.current_F_N = f_model.copy()
-            self.current_B_T[:2] = self.force_model_to_camera @ b_model[:2]
-            self.current_F_N[:2] = self.force_model_to_camera @ f_model[:2]
+            self.current_B_T = model_to_cam_vec(b_model, self.force_model_to_camera)
+            self.current_F_N = model_to_cam_vec(f_model, self.force_model_to_camera)
         except Exception:
             # 可视化诊断不得中断安全控制链；求解异常仍由正式控制分支处理。
             logger.exception("本地磁场/磁力诊断失败，显示值归零")
@@ -2503,7 +2496,9 @@ class MagneticDipoleControl(QMainWindow):
         return (p[0] / mpp + w / 2.0, h / 2.0 - p[1] / mpp)
 
     def _bead_pos_m(self):
-        return np.array([self.state_pos_mm[0], self.state_pos_mm[1], 0.0]) * 1e-3
+        return cam_to_model_pos(
+            self.state_pos_mm, self.force_model_to_camera, self.frame_offset_mm
+        )
 
     # ================= 路径 =================
     def _resampled(self, pts):
@@ -3225,6 +3220,7 @@ class MagneticDipoleControl(QMainWindow):
                 "bead_radius_m": self.spin_beadD.value() * 0.5e-3,
                 "max_cmd": self._current_cmd_limit(),
                 "force_model_to_camera": self.force_model_to_camera.copy(),
+                "frame_offset_mm": self.frame_offset_mm.copy(),
                 "field_direction": self._field_target_camera()[0],
                 "field_magnitude_mT": self._field_target_camera()[1],
             },

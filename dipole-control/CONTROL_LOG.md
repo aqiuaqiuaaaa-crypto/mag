@@ -6,7 +6,7 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 - `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，95 列。
 - `run.worker.csv`：每次完成的 MPC/solver 诊断一行，约 10 Hz，46 列；原有手动导出 MPC CSV 的格式和内容保留。
-- `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。额外位置 offset 与 ADC offset 当前都是 `0/default`，并保存原有像素中心，未应用额外标定。
+- `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。`R_force_model_to_camera` 是 model XY → camera world XY 的正交映射；`offset.position_mm` 保存当前 `frame_offset_mm` 的 XY 与固定 z=0，来源为 `config.FRAME_OFFSET_MM`，含义是模型原点在相机世界坐标中的位置（默认 `[0,0]`，尚未实机标定）。ADC offset 仍为 `0/default`，原有像素中心也保留；未增加 CSV 字段。
 - `run.summary.json`：正常结束时两个流分别的 attempted / accepted / written / dropped / rejected 和日志错误。
 
 四个文件均用 `x` 模式创建；任何一个已经存在都会报日志错误，不覆盖。CSV/JSON 写入、flush、Git 查询只在独立 daemon 线程执行。默认队列 2048 行，主线程和 worker 只提交标量快照，使用 `put_nowait`；队列满只增加对应流 dropped，之后可以恢复。目标关联缓存另有 128 项上限。
