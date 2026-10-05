@@ -7,6 +7,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from telemetry_main_patch import restore
+from watchdog_main_patch import restore as restore_watchdog_main
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -17,7 +18,7 @@ class TelemetryIntegrationTests(unittest.TestCase):
         for relative, expected in baseline["files"].items():
             data = (ROOT / relative).read_bytes()
             if relative == "Core/Src/main.c":
-                data = restore(data)
+                data = restore(restore_watchdog_main(data))
             elif relative == "MDK-ARM/pwm_02.uvprojx":
                 entry = baseline["project_addition"].encode("ascii")
                 self.assertEqual(data.count(entry), 1)

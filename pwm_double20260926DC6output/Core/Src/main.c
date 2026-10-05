@@ -62,6 +62,16 @@
 #define AMP_MIN         (-99)
 #define AMP_MAX         (99)
 
+
+/* PC heartbeat is approximately 33 ms. Timeout includes the 300 ms boundary. */
+#define CMD_TIMEOUT_MS 300U
+/* Two HAL tick increments give a conservative nominal 1..2 ms zero hold.
+   Also require new natural TIM1/TIM8 update events to prove CCR preloads
+   actually transferred, independently of SysTick interrupt latency.
+   No forced update event, timer restart, frequency or polarity change. */
+#define CMD_RECOVERY_ZERO_MS 2U
+#define DRIVER_CTRL_SD_PINS (GPIO_PIN_2 | GPIO_PIN_7 | GPIO_PIN_10)
+
 /* USER CODE END PD */
 
 
@@ -100,6 +110,15 @@ static volatile int a2_amp = 0;
 static volatile int a3_amp = 0;
 static volatile int a4_amp = 0;
 static volatile int a5_amp = 0;
+
+
+/* Foreground-owned watchdog state, volatile also for bench debugger inspection.
+   Only a validated command commit updates last_valid_cmd_tick. */
+static volatile uint32_t last_valid_cmd_tick = 0U;
+static volatile uint8_t cmd_seen = 0U;
+static volatile uint8_t watchdog_timeout_latched = 0U;
+static volatile uint8_t recovery_pending = 0U;
+static volatile uint32_t recovery_zero_tick = 0U;
 
 /* USER CODE END PV */
 
@@ -274,9 +293,131 @@ static uint8_t Check_Frame(const uint8_t *buf, uint16_t len)
         return 0;
     }
 
+    /* Two decimal digits per channel: parsing cannot fail or exceed +/-99.
+       The original parser returns zero on an invalid digit; reject it BEFORE
+       commit instead of confusing a parse failure with a valid zero command. */
+    {
+        uint16_t channel;
+        for (channel = 0U; channel < 6U; ++channel)
+        {
+            uint16_t digit = (uint16_t)(4U + channel * 7U);
+            if (buf[digit] < '0' || buf[digit] > '9' ||
+                buf[digit + 1U] < '0' || buf[digit + 1U] > '9')
+                return 0;
+        }
+    }
+
     return 1;
 }
 
+
+
+/* Confirmed custom groups: PF10 -> poles 1/4/5/6, PF2 -> pole 2,
+   PF7 -> pole 3. Existing firmware convention: HIGH enable, LOW shutdown. */
+static void driver_shutdown_all(void)
+{
+    HAL_GPIO_WritePin(GPIOF, DRIVER_CTRL_SD_PINS, GPIO_PIN_RESET);
+}
+
+static void driver_enable_all(void)
+{
+    HAL_GPIO_WritePin(GPIOF, DRIVER_CTRL_SD_PINS, GPIO_PIN_SET);
+}
+
+/* Caller masks interrupts. Reuse the exact TIM2 command-to-CCR path; the
+   callback only writes CCRs and is safe to invoke here without a timer event. */
+static void clear_command_outputs(void)
+{
+    a0_amp = 0;
+    a1_amp = 0;
+    a2_amp = 0;
+    a3_amp = 0;
+    a4_amp = 0;
+    a5_amp = 0;
+    HAL_TIM_PeriodElapsedCallback(&htim2);
+}
+
+/* Caller masks interrupts. Shutdown first protects the power stage while
+   zero CCR preloads propagate. PWM timers keep their original configuration
+   and keep running; the separate CTRL_SD pins disable all six drivers. */
+static void enter_command_timeout_safe_state(void)
+{
+    driver_shutdown_all();
+    clear_command_outputs();
+    watchdog_timeout_latched = 1U;
+    recovery_pending = 0U;
+}
+
+/* Foreground only; no delay, allocation, UART operation or busy wait.
+   An unseen command stays in the existing boot shutdown state indefinitely.
+   Check expiry before recovery, so a stalled recovery cannot re-enable. */
+static void command_watchdog_poll(void)
+{
+    uint32_t primask = __get_PRIMASK();
+    uint32_t now;
+    __disable_irq();
+    now = HAL_GetTick();
+    if (cmd_seen != 0U &&
+        (uint32_t)(now - last_valid_cmd_tick) >= CMD_TIMEOUT_MS)
+    {
+        if (watchdog_timeout_latched == 0U || recovery_pending != 0U)
+            enter_command_timeout_safe_state();
+    }
+    else if (recovery_pending != 0U &&
+             (uint32_t)(now - recovery_zero_tick) >= CMD_RECOVERY_ZERO_MS &&
+             __HAL_TIM_GET_FLAG(&htim1, TIM_FLAG_UPDATE) != RESET &&
+             __HAL_TIM_GET_FLAG(&htim8, TIM_FLAG_UPDATE) != RESET)
+    {
+        /* All commits during recovery kept commands/CCRs zero. Both timers
+           have produced a new natural UEV AFTER all zero CCR writes, so
+           ACTIVE compare values (not merely readable preloads) are zero.
+           Scheme A: the recovery frame's target is discarded; only a NEW
+           frame after this enable may apply a nonzero command. */
+        recovery_pending = 0U;
+        watchdog_timeout_latched = 0U;
+        driver_enable_all();
+    }
+    __DMB();
+    __set_PRIMASK(primask);
+}
+
+static void commit_command(int t0, int t1, int t2, int t3, int t4, int t5)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    /* Recheck at the actual commit boundary, including a HAL tick that
+       advanced during validation. A late valid frame starts safe recovery. */
+    command_watchdog_poll();
+    if (watchdog_timeout_latched != 0U)
+    {
+        clear_command_outputs();
+        if (recovery_pending == 0U)
+        {
+            /* Clear only the unused TIM1/TIM8 update flags AFTER zero writes.
+               These timers have no update IRQ/DMA enabled. A subsequent
+               natural UEV proves transfer; never force EGR.UG or restart. */
+            __HAL_TIM_CLEAR_FLAG(&htim1, TIM_FLAG_UPDATE);
+            __HAL_TIM_CLEAR_FLAG(&htim8, TIM_FLAG_UPDATE);
+            recovery_zero_tick = HAL_GetTick();
+            recovery_pending = 1U;
+        }
+    }
+    else
+    {
+        a0_amp = t0;
+        a1_amp = t1;
+        a2_amp = t2;
+        a3_amp = t3;
+        a4_amp = t4;
+        a5_amp = t5;
+    }
+    /* A recovery commit deliberately commits ZERO, never its old target.
+       Invalid/rejected data never reaches this function or feeds the timer. */
+    last_valid_cmd_tick = HAL_GetTick();
+    cmd_seen = 1U;
+    __DMB();
+    __set_PRIMASK(primask);
+}
 
 /* USER CODE END 0 */
 
@@ -364,9 +505,13 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
+    /* Check before RX: a frame arriving after the deadline recovers safely. */
+    command_watchdog_poll();
     if (rx_done)
     {
         uint16_t len;
+        uint8_t frame[RX_BUF_SIZE];
+        uint32_t primask;
 
         int t0;
         int t1;
@@ -378,12 +523,20 @@ int main(void)
         /*
          * 先清除标志
          */
-        rx_done = 0;
+        primask = __get_PRIMASK();
+        __disable_irq();
 
         /*
          * 读取本次接收长度
          */
         len = rx_len;
+        if (len > RX_BUF_SIZE) len = RX_BUF_SIZE;
+        /* RX callback may replace process_buf after interrupts resume.
+           Validate, parse and echo this one bounded immutable snapshot. */
+        memcpy(frame, process_buf, len);
+        rx_done = 0;
+        __DMB();
+        __set_PRIMASK(primask);
 
 
         /*
@@ -394,7 +547,7 @@ int main(void)
             /*
              * 检查协议格式
              */
-            if (Check_Frame(process_buf, len))
+            if (Check_Frame(frame, len))
             {
                 /*
                  * 解析6路电流
@@ -403,57 +556,48 @@ int main(void)
                  *     ^
                  *     3
                  */
-                t0 = PARSE_SIGNED(process_buf, 3);
+                t0 = PARSE_SIGNED(frame, 3);
 
                 /*
                  * a1:-45
                  *        ^
                  *        10
                  */
-                t1 = PARSE_SIGNED(process_buf, 10);
+                t1 = PARSE_SIGNED(frame, 10);
 
                 /*
                  * a2:+60
                  *               ^
                  *               17
                  */
-                t2 = PARSE_SIGNED(process_buf, 17);
+                t2 = PARSE_SIGNED(frame, 17);
 
                 /*
                  * a3:-75
                  *                      ^
                  *                      24
                  */
-                t3 = PARSE_SIGNED(process_buf, 24);
+                t3 = PARSE_SIGNED(frame, 24);
 
                 /*
                  * a4:+90
                  *                             ^
                  *                             31
                  */
-                t4 = PARSE_SIGNED(process_buf, 31);
+                t4 = PARSE_SIGNED(frame, 31);
 
                 /*
                  * a5:-10
                  *                                    ^
                  *                                    38
                  */
-                t5 = PARSE_SIGNED(process_buf, 38);
+                t5 = PARSE_SIGNED(frame, 38);
 
 
                 /*
                  * 更新PWM使用的6路电流变量
                  */
-                __disable_irq();
-
-                a0_amp = t0;
-                a1_amp = t1;
-                a2_amp = t2;
-                a3_amp = t3;
-                a4_amp = t4;
-                a5_amp = t5;
-
-                __enable_irq();
+                commit_command(t0, t1, t2, t3, t4, t5);
 
 
                 /*
@@ -483,23 +627,23 @@ int main(void)
                  * 后面可以改成18字节有符号回传。
                  */
 
-                tx_buf[0]  = process_buf[4];
-                tx_buf[1]  = process_buf[5];
+                tx_buf[0]  = frame[4];
+                tx_buf[1]  = frame[5];
 
-                tx_buf[2]  = process_buf[11];
-                tx_buf[3]  = process_buf[12];
+                tx_buf[2]  = frame[11];
+                tx_buf[3]  = frame[12];
 
-                tx_buf[4]  = process_buf[18];
-                tx_buf[5]  = process_buf[19];
+                tx_buf[4]  = frame[18];
+                tx_buf[5]  = frame[19];
 
-                tx_buf[6]  = process_buf[25];
-                tx_buf[7]  = process_buf[26];
+                tx_buf[6]  = frame[25];
+                tx_buf[7]  = frame[26];
 
-                tx_buf[8]  = process_buf[32];
-                tx_buf[9]  = process_buf[33];
+                tx_buf[8]  = frame[32];
+                tx_buf[9]  = frame[33];
 
-                tx_buf[10] = process_buf[39];
-                tx_buf[11] = process_buf[40];
+                tx_buf[10] = frame[39];
+                tx_buf[11] = frame[40];
 
 
                 /*
@@ -593,13 +737,7 @@ void Start_PWM(void)
     /*
      * 开启光耦
      */
-    HAL_GPIO_WritePin(
-        GPIOF,
-        GPIO_PIN_2 |
-        GPIO_PIN_7 |
-        GPIO_PIN_10,
-        GPIO_PIN_SET
-    );
+    driver_enable_all(); /* Existing first-command startup. */
 
 
     /*
@@ -685,13 +823,7 @@ void Stop_PWM(void)
     /*
      * 关闭光耦
      */
-    HAL_GPIO_WritePin(
-        GPIOF,
-        GPIO_PIN_2 |
-        GPIO_PIN_7 |
-        GPIO_PIN_10,
-        GPIO_PIN_RESET
-    );
+    driver_shutdown_all(); /* Existing boot/PWM stop. */
 
 
     /*

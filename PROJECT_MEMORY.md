@@ -2,6 +2,23 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-05：STM32 command watchdog + CTRL_SD 硬件关断，独立任务）
+
+- 基于 `4f18f887faf9f3209710f20b19073f89a547ef3d`（`fix: latch serial faults and add idle heartbeat`），本轮只新增 STM32 前台 command timeout 和 CTRL_SD 关断/安全恢复，生产修改仅 `pwm_double20260926DC6output/Core/Src/main.c`。PC 32 个 tracked 文件逐字节保持；MPC/ESO/solver/R-L/路径、43B signed 协议、a0..a5 顺序、command→CCR 公式、PWM 配置、ADC/DMA/current_sense/telemetry 均未修改。
+- 电平审查未发现冲突：现有 `gpio.c` 先对 PF2/PF7/PF10 写 RESET，再配置为输出；原 Start_PWM 写 SET、Stop_PWM 写 RESET。Genbotter 驱动板手册印刷第 6 页说明内部 SD_IN=0 时 HO/LO 都低、=1 时互补；Infineon IR2104 官方 datasheet 第 5 页 Figure 1/3 同样确认芯片关断输入低有效。CTRL_SD 到内部 SD_IN 的完整连接没有在现有手册中画出；软件沿用既有 HIGH enable / LOW shutdown，接口实际电平/上电瞬态仍由后续台架确认，未用软件测试代替实测。PF10→poles1/4/5/6，PF2→pole2，PF7→pole3 的用户确认定制接线保持。
+- `CMD_TIMEOUT_MS=300U` 集中定义；仅合法 snapshot 通过 Check_Frame 和原 PARSE_SIGNED 并正式调用 commit_command 后更新 last_valid_cmd_tick。未收到第一帧时 cmd_seen=0，保持原启动 command=0、CCR=4200、GPIO LOW/PWM stopped；不因初始 last tick=0 误超时。正常首次启动行为保持。
+- 前台 `command_watchdog_poll()` 及提交边界复查使用 `(uint32_t)(now-last_valid_cmd_tick)>=CMD_TIMEOUT_MS`：299 ms 不触发，300 ms 即触发，301 ms 已锁存，跨 uint32 回绕正确。`enter_command_timeout_safe_state()` 先拉低三组 CTRL_SD，清零六路命令，再直接复用原 HAL_TIM_PeriodElapsedCallback(&htim2) 更新六个 CCR=4200，设置 watchdog_timeout_latched、取消 recovery_pending。TIM1/TIM8/TIM2 继续原节拍运行，硬件关断通过 CTRL_SD；没有 Stop/restart PWM、forced UEV、IWDG 或新 watchdog 外设。
+- 恢复采用方案 A：timeout 后第一帧合法 command 只提交零并开始 recovery，丢弃该帧非零目标；等待期间其他合法帧也只提交零/喂狗。零 CCR 写入后清除两个原本未使用的 TIM1/TIM8 update flags（无 update IRQ/DMA），同时等待 `CMD_RECOVERY_ZERO_MS=2U` 个 HAL tick 和两个新的自然 UEV，直接证明两组 active compare 已归零后才解除 latch、三组 GPIO HIGH。随后新合法帧才可生效非零；不保存或自动恢复旧目标。先检查 300 ms 超时，再允许 enable；等待过程中再次失联继续锁存。约 1..2 ms 为正常 SysTick 下的恢复等待设计值，实际台架时序待测。
+- 为确保“非法帧绝不喂狗”，补齐两个与本任务直接相关的接收门槛：原 Check_Frame 只查固定字符而未检查 12 个数字，原 PARSE_SIGNED 对非法数字返回 0，可能将解析失败当零值提交；现于提交前拒绝非十进制字符，三字符格式天然限制 ±99。前台用短 PRIMASK 临界区复制最多 64 字节不可变 snapshot，统一验证、解析和 echo，避免 RX callback 在验证后替换 mailbox；原 RX callback、DMA 重启、numeric parser 字节保持。保留旧 len>=43 的合法前缀接受语义，没有改 UART 分帧协议。
+- 所有 GPIO 动作集中复用 driver_shutdown_all / driver_enable_all，包括原 Start_PWM/Stop_PWM。所有新增临界区保存/恢复 PRIMASK；不阻塞、不分配内存、不做 UART/ADC 工作。保留内部 volatile latch 和状态供台架读取；本轮不扩展 @ADC/error_flags，不改 GUI parser 或 ADC→控制关系。原 12-byte unsigned echo 仍回显输入数字，不是 command 执行 ACK。
+- 软件回归全部通过：watchdog C/HAL 29 场景、集成/范围检查 7 项；原 ADC 静态保护 16 项、current_sense C 17 场景、telemetry 集成 3 项、telemetry C 18 场景，共 **90 项/场景**。TCC 0.9.27 以 -std=c99 -Wall -Werror 编译实际生产函数与前台循环；模型区分 CCR preload 和 active compare，覆盖两个 timer 中一个未发生自然更新时禁止 enable。两份历史 hash fixture 未更新，精确可逆 allowlist 之外的任何字节变动仍会被检出。
+- 正常路径证据：原 checkpoint C/HAL 复现 350 ms 无 RX 后 a0=30、CCR1=5460、CTRL_SD=HIGH；新版本 299/300/301 边界通过。六路分别穷举 -99..99 的 **1194 帧**健康通信回放与 checkpoint 逐位一致，比较 command、CCR preload、模拟 active compare、GPIO、四组 PWM/PWMN channel mask、echo count；共同 SHA-256 为 `c17eaff92f48641c050e3aab25bf0f6956a67c2bd81f0f5095d9c951eb9990a4`。该证据不等于真实板载 PWM 瞬态测量。
+- 上位机兼容验证：solver/protocol/safety 25/25、CURT parser/GUI 132/132、GUI smoke PASS；新增三个 Python 测试/保护模块 Ruff、Black、mypy PASS。测试中未打开真实 COM/相机。源码保护确认 131 个固件非测试输入仅允许 main.c 精确新增，其余逐字节保持，Keil 副本的全部 131 个非测试输入和当前源码一致。
+- Keil MDK 5.43a / ARMCC 5.06u7 最终 Rebuild：34 C + 1 startup，最终链接/HEX 生成成功，**0 Error、1 个原有 EOF newline Warning**。Program Size：Code=16064、RO-data=480、RW-data=76、ZI-data=2700；相对原固件 Code +364 bytes、静态 RAM +16 bytes，新增局部 RX snapshot 为 64 bytes。编译/链接不等于实板验证。
+- 本轮新 HEX：`artifacts/command-watchdog-20261005/pwm_02.hex`，SHA-256=`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`；同目录保留 AXF/MAP、构建日志、原/新回放、QA/源码保护证据和 `HARDWARE_SOP.md`。原工程历史 HEX/AXF 未覆盖。**新 watchdog HEX 尚未烧录，实板 timeout、真实 CTRL_SD/驱动响应、上电/关断/恢复瞬态均未测试。**
+- 这是前台协作式 command watchdog，不保证 CPU 停机、SysTick 停止或长期关中断时的关断。实际触发延迟包含 HAL tick 量化和前台调度。用户后续按 SOP 测量正常 heartbeat、USB 拔出/GUI 强制结束、三组 GPIO 和恢复顺序；本 checkpoint 不调整 300 ms，不接入六路电流 PI。
+- 用户授权在全部软件验证通过后建立独立 checkpoint：本条所在提交 `feat: add hardware shutdown command watchdog`，仅包含本记忆、main.c、固件测试/桩/精确基线保护适配及 tests README；不提交 artifacts，不 push，不烧录。下方旧“firmware command watchdog 留下一阶段”的记录属于上一 PC 任务的历史状态。
+
 ## 最新权威摘要（2026-10-05：PC 串口故障锁存、write timeout、IDLE heartbeat，独立任务）
 
 - 基于 `c0bd30673d2d80d95ba01695156f8d267c212ec1`（`fix: prevent coil scan restart after stop`），本轮仅修改 PC 串口安全边界、模式入口保护及状态显示，新增 `tests/test_serial_safety.py`；现有测试仅适配写超时参数、新发送历史语义及新增 IDLE heartbeat 帧数。

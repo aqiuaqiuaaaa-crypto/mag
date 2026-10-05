@@ -90,3 +90,55 @@ completion during status inspection and pending RX with the shared HAL lock.
 All logs, current-source input hashes, final HEX/AXF/MAP and Keil output are saved
 in root `artifacts/curt-telemetry-20261003/`. The original project output directory
 still contains historical binaries; use the HEX in the artifact directory.
+
+## Command timeout and hardware shutdown (2026-10-05)
+
+```powershell
+python -B tests/test_command_watchdog_integration.py
+python -B tests/run_command_watchdog_tests.py --cc <host-C-compiler>
+```
+
+`main.c` checks command age in its nonblocking foreground loop and again at the
+actual command commit. Only a validated immutable RX snapshot commits and feeds
+`last_valid_cmd_tick`. The signed 43-byte format, channel order, numeric parser,
+TIM2 callback and its `4200 + command * 42` formula remain unchanged. The format
+checker now rejects nondecimal digits; formerly the numeric parser silently
+returned zero for them. The original acceptance of a valid 43-byte prefix in a
+longer RX event is retained. Short, malformed and invalid frames never feed.
+
+At unsigned HAL tick age **>=300 ms**, the common safety function lowers PF10,
+PF2 and PF7, clears all commands, calls the original TIM2 CCR update path, and
+latches timeout. The PWM timers continue running under driver shutdown. No
+forced update event, polarity/topology/frequency change, ADC feedback, hardware
+IWDG or telemetry error bit is introduced. This is a cooperative command timeout;
+it does not protect against a halted CPU, frozen SysTick or interrupts disabled
+indefinitely. Actual shutdown time also includes foreground scheduling latency.
+
+Recovery is scheme A: the first valid frame commits zero and starts recovery.
+All frames processed during the settling phase also commit zero. After the zero
+writes, only the unused TIM1/TIM8 update flags are cleared (no timer update IRQ
+or DMA is enabled). Polling waits for two HAL tick increments AND a new natural
+update event from EACH timer. These events directly prove that the PWM **active**
+compare values became zero, independently of SysTick interrupt latency. Only then
+does polling clear the latch and raise all three CTRL_SD pins. A subsequent
+valid frame may command nonzero; no buffered old target is automatically applied.
+Recovery expiry is checked before enable. Boot with no command retains the
+existing GPIO LOW/PWM stopped state; the original first-command startup remains.
+
+The host C suite compiles production definitions/functions and the actual main
+loop body; generated clock/peripheral initialization is protected by byte checks
+and compiled in Keil separately. Fake HAL models 500 us TIM2 updates and separate
+50 us natural CCR preload transfers, including a still-stale active compare at
+timeout. 29 scenarios cover heartbeat, 299/300/301 boundaries, rejected frames,
+uint32 wrap, startup, recovery ordering/quantization/expiry/early frames, repeated
+timeouts, missing preload update on one timer, no stale command revival, RX
+snapshot races, PRIMASK and GPIO groups.
+Its healthy trace exhausts -99..99 on each of six channels (1194 frames) and can
+be compared byte-for-byte with a saved checkpoint using `--baseline-main` and
+`--trace-output`; `--baseline-timeout-probe` reproduces the old held output.
+
+`watchdog_main_patch.py` reverses only the explicit new main edits before the
+historical ADC/telemetry hash checks. Both old hash fixtures remain unchanged;
+edits outside the allowlist remain detectable. PC, sampling and telemetry source
+files are unchanged. New build/evidence and the pending hardware SOP are in
+`artifacts/command-watchdog-20261005/`; bench tests are **not yet performed**.

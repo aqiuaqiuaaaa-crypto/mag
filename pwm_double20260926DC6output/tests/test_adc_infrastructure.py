@@ -8,6 +8,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from telemetry_main_patch import restore as restore_telemetry_main
+from watchdog_main_patch import restore as restore_watchdog_main
 
 FIRMWARE = Path(__file__).resolve().parents[1]
 FIXTURE = Path(__file__).with_name("signed_pwm_baseline.json")
@@ -200,6 +201,8 @@ class ADCInfrastructureTests(unittest.TestCase):
         baseline = json.loads(FIXTURE.read_text())
         for relative, functions in baseline["functions"].items():
             data = (FIRMWARE / relative).read_bytes()
+            if relative == "Core/Src/main.c":
+                data = restore_watchdog_main(data)
             for name, expected in functions.items():
                 with self.subTest(file=relative, function=name):
                     self.assertEqual(digest(c_function(data, name)), expected)
@@ -222,7 +225,7 @@ class ADCInfrastructureTests(unittest.TestCase):
         data = (FIRMWARE / "Core/Src/main.c").read_bytes()
         # Reverse only the authorized foreground telemetry edits, then enforce
         # the unchanged pre-ADC SHA-256. Never recapture the original fixture.
-        data = restore_telemetry_main(data)
+        data = restore_telemetry_main(restore_watchdog_main(data))
         self.assertEqual(data.count(MAIN_INCLUDE), 1, "measurement header missing")
         self.assertEqual(data.count(MAIN_START), 1, "measurement startup missing")
         self.assertEqual(digest(data.replace(MAIN_INCLUDE, b"").replace(MAIN_START, b"")), baseline["main_sha256"])
