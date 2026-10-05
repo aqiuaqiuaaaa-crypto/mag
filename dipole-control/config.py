@@ -105,6 +105,9 @@ MPC_HZ = 10.0  # MPC 控制器
 SOLVER_HZ = 10.0  # MDM 磁力逆解
 CURRENT_HZ = 30.0  # 电流执行层（插值+斜率+量化+串口）
 PWM_HZ = 20000.0  # PWM 频率（STM32/H 桥侧，Python 仅记录与配置）
+KALMAN_STALE_S = 0.15  # 保守软件门槛；age > 此值暂停 worker，非实机标定
+TARGET_STALE_HOLD_S = 0.30  # age > 此值冻结目标接受/插值，保持最后成功命令
+TARGET_STALE_STOP_S = 1.00  # age > 此值由 GUI normal_stop 按原斜率归零
 
 # MPC（准静态模型：x' = x + dt·(F+d)/c，c = 斯托克斯阻力系数）
 MPC_HORIZON = 3  # 预测步数（10Hz × 3 = 300ms 视界）

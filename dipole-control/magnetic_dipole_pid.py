@@ -374,8 +374,10 @@ class MagneticDipoleControl(QMainWindow):
         self.last_solver_rec = None
         self.cycle_over_cnt = 0
         # 多速率架构：10Hz MPC/MDM 工作线程 + 30Hz 电流执行层
-        self.shared = SharedState()
-        self.executor = CurrentExecutor()
+        self.control_clock = time.monotonic
+        self.shared = SharedState(clock=self.control_clock)
+        self.executor = CurrentExecutor(clock=self.control_clock)
+        self.stale_status = "FRESH"
         self.worker = None
         self.last_tick_time = None
         self.loop_jitter_ms = 0.0
@@ -1799,7 +1801,7 @@ class MagneticDipoleControl(QMainWindow):
         }
         return {
             "started_wall_utc": datetime.now(timezone.utc).isoformat(),
-            "started_mono": time.monotonic(),
+            "started_mono": self.control_clock(),
             "gui": settings,
             "config": {key: value for key, value in vars(cfg).items() if key.isupper()},
             "physics": dict(
@@ -1862,7 +1864,9 @@ class MagneticDipoleControl(QMainWindow):
                 "seq": "executor-used target sequence; join worker with (run,seq)",
                 "s_progress": "existing worker nearest projection arc, mm; not a new path state",
                 "ADC": "raw counts, latest received snapshot, monitoring only; no amp conversion",
-                "kalman_age_ms": "existing wall-clock snapshot age at worker completion; diagnostic only",
+                "kalman_age_ms": "monotonic age of shared input; worker row uses consumed snapshot",
+                "target_age_ms": "monotonic age of executor-checked target; latest publication if executor not run",
+                "stale_status": "FRESH / STALE_INPUT / STALE_TARGET / STALE_TARGET_TIMEOUT",
                 "cmd_sent": "final safety-layer command state; not a hardware delivery acknowledgement",
                 "dropped": "cumulative queue overflows across both streams before this row",
             },
@@ -1933,7 +1937,7 @@ class MagneticDipoleControl(QMainWindow):
         sink = self.control_logger
         if sink is not None and sink.recording:
             self._control_tick_row = {
-                "t_mono": time.monotonic(),
+                "t_mono": self.control_clock(),
                 "t_wall": now,
                 "tick": self._control_tick_count,
                 "dt_ms": dt * 1e3,
@@ -1966,6 +1970,21 @@ class MagneticDipoleControl(QMainWindow):
                 max_cmd=self._current_cmd_limit(),
                 serial_connected=self.ser is not None,
                 run=self._control_log_run,
+            )
+            freshness = self.shared.get_freshness()
+            row.update(
+                kalman_age_ms=(
+                    None
+                    if freshness["kalman_age_s"] is None
+                    else freshness["kalman_age_s"] * 1e3
+                ),
+                target_age_ms=(
+                    self.executor.target_age_s
+                    if row.get("executor_updated", False)
+                    else freshness["target_age_s"]
+                )
+                * 1e3,
+                stale_status=self.stale_status,
             )
             if self.bead is not None:
                 row.update(
@@ -2652,7 +2671,8 @@ class MagneticDipoleControl(QMainWindow):
         # 多速率模式：发布参考路径（世界系）并启动 10Hz MPC/MDM 工作线程
         self._stop_worker()
         # stop() 后的 Event 不能复用；每次启动建立一份干净的共享状态。
-        self.shared = SharedState()
+        self.shared = SharedState(clock=self.control_clock)
+        self.stale_status = "FRESH"
         self.shared.set_reference(
             [np.array(self.px_to_world_mm(p)) for p in self.full_path],
             self.spin_path_speed.value(),
@@ -2662,7 +2682,7 @@ class MagneticDipoleControl(QMainWindow):
         self.shared.set_last_sent(self.last_sent_cmd)
         self._publish_mpc_params(time.time())
         self.shared.set_solver_error(None)
-        self.executor = CurrentExecutor()
+        self.executor = CurrentExecutor(clock=self.control_clock)
         self.worker = ControlWorker(self.shared, self.solver)
         if self.control_logger is not None and self.control_logger.recording:
             self._attach_control_log()
@@ -3119,10 +3139,14 @@ class MagneticDipoleControl(QMainWindow):
     # ================= MPC 模式（30Hz 电流执行，10Hz MPC/MDM 在工作线程） =================
     def mpc_track_step(self, dt):
         if self.bead is None:
+            if not self._check_control_freshness():
+                return
             if self.lost_since is None:
-                self.lost_since = time.time()
-            elif time.time() - self.lost_since > 1.0:
+                self.lost_since = self.shared.clock()
+            elif self.shared.clock() - self.lost_since > 1.0:
                 self.normal_stop()  # 视觉丢失 >1s 正常停止
+            if self.tracking and self.stale_status != "FRESH":
+                self._send_idle_heartbeat()  # same last-successful command while paused
             return
         self.lost_since = None
         pos = self.state_pos_mm
@@ -3156,6 +3180,8 @@ class MagneticDipoleControl(QMainWindow):
             self.lbl_dir.setText(f"⚠ 工作线程异常，已安全停止：{err}")
             self.normal_stop()
             return
+        if not self._check_control_freshness():
+            return
         # 30Hz 电流执行层：插值 → 斜率限幅 → 量化 → 发送
         t0 = time.perf_counter()
         diag = self.executor.step(
@@ -3167,6 +3193,14 @@ class MagneticDipoleControl(QMainWindow):
             max_cmd=self._current_cmd_limit(),
         )
         diag = self._diag_to_camera(diag)
+        if self.executor.stale_status != "FRESH":
+            self.stale_status = self.executor.stale_status
+        elif self.stale_status == "STALE_TARGET":
+            self.stale_status = "FRESH"  # a fresh target arrived during this tick
+        if diag.get("stop_requested", False):
+            self.stale_status = "STALE_TARGET_TIMEOUT"
+            self.normal_stop()
+            return
         self.send_commands(diag["cmd"])
         self.shared.set_last_sent(self.last_sent_cmd)
         self.last_F_actual = diag["F_est"].copy()
@@ -3186,6 +3220,25 @@ class MagneticDipoleControl(QMainWindow):
         # 轨迹
         self.traj_px.append(tuple(self.bead[:2]))
         self.traj_mm.append(tuple(self.state_pos_mm))
+
+    def _check_control_freshness(self) -> bool:
+        """Minimal AUTO_TRACK gate; timeout uses the existing normal-stop ramp."""
+        freshness = self.shared.get_freshness()
+        status = freshness["target_status"]
+        if status == "FRESH":
+            age = freshness["kalman_age_s"]
+            if (
+                age is None
+                or age > cfg.KALMAN_STALE_S
+                or freshness["worker_status"] == "STALE_INPUT"
+            ):
+                status = "STALE_INPUT"
+        self.stale_status = status
+        if status == "STALE_TARGET_TIMEOUT":
+            self.lbl_dir.setText("⚠ STALE_TARGET_TIMEOUT：目标超时，按正常斜率归零")
+            self.normal_stop()
+            return False
+        return True
 
     def _publish_mpc_params(self, now):
         """把主线程可调参数发布给 10Hz MPC/MDM 工作线程。"""
@@ -3450,6 +3503,7 @@ class MagneticDipoleControl(QMainWindow):
         timeout = " | ⚠控制周期超时" if self.cycle_over_cnt >= 5 else ""
         self.status_lbl.setText(
             f"模式: {mode} | 磁珠: {pos} {vel} | "
+            f"Freshness: {self.stale_status} | "
             f"最后成功命令: [{', '.join(f'{c:+03d}' for c in self.last_sent_cmd)}]{extra} | "
             f"Cycle {self.total_ms:.1f}ms ({1.0 / dt:.0f}Hz){timeout}"
         )

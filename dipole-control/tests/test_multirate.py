@@ -113,7 +113,12 @@ def test_mpc_mdm_10hz():
         time.time(),
     )
     worker.start()
-    time.sleep(1.2)
+    # Maintain the original 30Hz producer while measuring the 10Hz worker.
+    # A single snapshot followed by 1.2s silence is now correctly stale.
+    until = time.monotonic() + 1.2
+    while time.monotonic() < until:
+        shared.set_kalman(np.zeros(2), np.zeros(2), time.time())
+        time.sleep(1 / 30)
     shared.stop()
     worker.join(timeout=2.0)
     seq = shared._I_target["seq"]

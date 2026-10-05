@@ -26,7 +26,7 @@ import copy
 import math
 import threading
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
 import config as cfg
@@ -39,13 +39,28 @@ if TYPE_CHECKING:
     from mpc import ForceMPC
 
 
+def target_status(age_s: float) -> str:
+    """Inclusive fresh/hold boundaries; strictly greater ages escalate."""
+    if age_s > cfg.TARGET_STALE_STOP_S:
+        return "STALE_TARGET_TIMEOUT"
+    if age_s > cfg.TARGET_STALE_HOLD_S:
+        return "STALE_TARGET"
+    return "FRESH"
+
+
 class SharedState:
     """30Hz 主线程 ↔ 10Hz 工作线程 的线程安全共享快照"""
 
-    def __init__(self):
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self.clock = clock if clock is not None else time.monotonic
         self._lock = threading.Lock()
         # 主线程 → 工作线程
-        self._kalman = {"pos": np.zeros(2), "vel": np.zeros(2), "t": 0.0}
+        self._kalman: dict[str, Any] = {
+            "pos": np.zeros(2),
+            "vel": np.zeros(2),
+            "t": 0.0,
+            "t_mono": None,
+        }
         self._ref = {"path": [], "speed": 1.0, "t": 0.0}  # 世界系 mm 路径点
         self._params = {
             "fmax": cfg.MPC_FMAX_UN,
@@ -59,14 +74,16 @@ class SharedState:
             "fz_lift": 0.0,
             "eso_d": np.zeros(2),
             "t": 0.0,
+            "t_mono": None,
         }
         self._last_sent = [0] * 6
         # 工作线程 → 主线程
         # currents 始终使用安培；串口整数指令只存在 rec["commands"] 中。
-        self._I_target = {
+        self._I_target: dict[str, Any] = {
             "currents": np.zeros(6),
             "seq": 0,
             "t": 0.0,
+            "t_mono": self.clock(),  # startup zero target gets bounded grace
             "rec": None,
             "mpc_time_ms": 0.0,
             "solver_time_ms": 0.0,
@@ -75,8 +92,9 @@ class SharedState:
             "ref_target": np.zeros(2),
             "ref_velocity": np.zeros(2),
         }
-        self._mpc_log = []  # 10Hz 事件日志
+        self._mpc_log: list[tuple[Any, ...]] = []  # 10Hz 事件日志
         self._solver_error = None
+        self._worker_status = "FRESH"
         self._stop = threading.Event()
         # Optional observation only; never consumed by a control calculation.
         self.control_logger: ControlLogger | None = None
@@ -96,6 +114,7 @@ class SharedState:
                 "pos": np.array(pos, float).copy(),
                 "vel": np.array(vel, float).copy(),
                 "t": t,
+                "t_mono": self.clock(),
             }
 
     def set_reference(self, path_world_mm, speed, t):
@@ -110,6 +129,7 @@ class SharedState:
         with self._lock:
             self._params = dict(params)
             self._params["t"] = t
+            self._params["t_mono"] = self.clock()
 
     def set_last_sent(self, cmd_list):
         with self._lock:
@@ -119,6 +139,31 @@ class SharedState:
         with self._lock:
             k = self._kalman
             return k["pos"].copy(), k["vel"].copy(), k["t"]
+
+    def get_kalman_snapshot(
+        self,
+    ) -> tuple[NDArray[np.float64], NDArray[np.float64], float, float | None]:
+        """Position, velocity and both clocks from one lock acquisition."""
+        with self._lock:
+            k = self._kalman
+            return k["pos"].copy(), k["vel"].copy(), k["t"], k["t_mono"]
+
+    def set_worker_status(self, status: str) -> None:
+        with self._lock:
+            self._worker_status = status
+
+    def get_freshness(self) -> dict[str, Any]:
+        """Monitor ages without renewing any input/target timestamp."""
+        with self._lock:
+            now = self.clock()
+            km = self._kalman["t_mono"]
+            target_age = max(0.0, now - self._I_target["t_mono"])
+            return {
+                "kalman_age_s": None if km is None else max(0.0, now - km),
+                "target_age_s": target_age,
+                "target_status": target_status(target_age),
+                "worker_status": self._worker_status,
+            }
 
     def get_reference(self):
         with self._lock:
@@ -154,13 +199,29 @@ class SharedState:
         cost,
         ref_target=None,
         ref_velocity=None,
-    ):
+        *,
+        input_mono=None,
+        expected_seq=None,
+    ) -> bool:
         with self._lock:
+            publish_mono = self.clock()
+            # Recheck the consumed input at commit: a slow solve must not turn
+            # old position into a newly timestamped target. CAS protects a
+            # newer publication; rejection never changes target/seq/timestamps.
+            if input_mono is not None:
+                if self._stop.is_set():
+                    return False
+                if publish_mono - input_mono > cfg.KALMAN_STALE_S:
+                    self._worker_status = "STALE_INPUT"
+                    return False
+            if expected_seq is not None and self._I_target["seq"] != expected_seq:
+                return False
             seq = self._I_target["seq"] + 1
             self._I_target = {
                 "currents": np.asarray(currents, float).copy(),
                 "seq": seq,
                 "t": time.time(),
+                "t_mono": publish_mono,
                 "rec": rec,
                 "mpc_time_ms": mpc_ms,
                 "solver_time_ms": solver_ms,
@@ -177,6 +238,8 @@ class SharedState:
                 self.control_logger.remember_target(
                     self.control_log_run, seq, self._I_target
                 )
+            self._worker_status = "FRESH"
+            return True
 
     def get_I_target(self):
         with self._lock:
@@ -216,9 +279,17 @@ class ControlWorker(threading.Thread):
     deadline 调度（perf_counter 基准 + 失步重同步）；异常不外泄，转安全停止标志。
     MDM 偶发 15~30ms 不会影响 30Hz 主循环（视觉/Kalman/电流执行在主线程）。"""
 
-    def __init__(self, shared: SharedState, solver, period=None):
+    def __init__(
+        self,
+        shared: SharedState,
+        solver,
+        period=None,
+        *,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
         super().__init__(daemon=True, name="mpc-mdm-worker")
         self.shared = shared
+        self.clock = clock if clock is not None else shared.clock
         # DipoleSolver 有位置相关的 Bc/Gc 可变缓存。GUI 主线程还会同时做正向
         # 诊断，因此工作线程必须持有独立副本，避免两个线程交叉覆盖同一缓存。
         self.solver = copy.deepcopy(solver)
@@ -321,13 +392,19 @@ class ControlWorker(threading.Thread):
         if not params.get("mpc_on", False):
             time.sleep(self.period)  # 非 MPC 模式挂起
             return
+        pos, _vel, _kalman_t, kalman_mono = self.shared.get_kalman_snapshot()
+        if kalman_mono is None or self.clock() - kalman_mono > cfg.KALMAN_STALE_S:
+            self.shared.set_worker_status("STALE_INPUT")
+            self._log_stale_input(kalman_mono)
+            return
+        self.shared.set_worker_status("FRESH")
+        expected_seq = self.shared.get_I_target()[1]
         c_drag = self._drag_c(params)
         signature = self._controller_signature(params, c_drag)
         if self.mpc_x is None or signature != self._mpc_signature:
             self._refresh_mpc(params, c_drag)
         fmax = self.mpc_x.fmax
 
-        pos, _vel, kalman_t = self.shared.get_kalman()
         path, speed = self.shared.get_reference()
         eso_d = params.get("eso_d", np.zeros(2))
         R = np.asarray(params.get("force_model_to_camera", np.eye(2)), float)
@@ -411,7 +488,7 @@ class ControlWorker(threading.Thread):
             if rec.get("sparse_infeasible", False)
             else rec["currents"]
         )
-        self.shared.set_I_target(
+        published = self.shared.set_I_target(
             target_currents,
             rec,
             F_target[:2],
@@ -420,7 +497,13 @@ class ControlWorker(threading.Thread):
             out_x["cost"] + out_y["cost"],
             ref_target=ref[0],
             ref_velocity=vref[0],
+            input_mono=kalman_mono,
+            expected_seq=expected_seq,
         )
+        if not published:
+            if self.shared.get_freshness()["worker_status"] == "STALE_INPUT":
+                self._log_stale_input(kalman_mono)
+            return
         self.shared.append_mpc_log(
             (
                 time.time(),
@@ -446,7 +529,7 @@ class ControlWorker(threading.Thread):
         )
         if self.shared.control_logger is not None:
             self._log_control_worker(
-                kalman_t,
+                kalman_mono,
                 pos,
                 eso_d,
                 F_prev_camera,
@@ -464,7 +547,7 @@ class ControlWorker(threading.Thread):
 
     def _log_control_worker(
         self,
-        kalman_t: float,
+        kalman_mono: float,
         pos: NDArray[np.float64],
         eso_d: NDArray[np.float64],
         f_prev: NDArray[np.float64],
@@ -488,11 +571,13 @@ class ControlWorker(threading.Thread):
             _, seq, _, _ = self.shared.get_I_target()
             run = self.shared.control_log_run
             row: dict[str, Scalar] = {
-                "t_mono": time.monotonic(),
+                "t_mono": self.clock(),
                 "t_wall": time.time(),
                 "run": run,
                 "seq": seq,
-                "kalman_age_ms": (time.time() - kalman_t) * 1e3 if kalman_t else None,
+                "kalman_age_ms": max(0.0, self.clock() - kalman_mono) * 1e3,
+                "target_age_ms": self.shared.get_freshness()["target_age_s"] * 1e3,
+                "stale_status": "FRESH",
                 "s_progress": float(self._ref_arc),
                 "mpc_ms": float(mpc_ms),
                 "solver_ms": float(solver_ms),
@@ -534,6 +619,28 @@ class ControlWorker(threading.Thread):
         except Exception as exc:  # noqa: BLE001 -- diagnostics cannot stop the worker
             sink.fail(exc)
 
+    def _log_stale_input(self, kalman_mono: float | None) -> None:
+        """Log a skipped worker cycle using the unchanged target sequence."""
+        sink = self.shared.control_logger
+        if sink is None or not sink.recording:
+            return
+        sink.enqueue(
+            "worker",
+            {
+                "t_mono": self.clock(),
+                "t_wall": time.time(),
+                "run": self.shared.control_log_run,
+                "seq": self.shared.get_I_target()[1],
+                "kalman_age_ms": (
+                    None
+                    if kalman_mono is None
+                    else max(0.0, self.clock() - kalman_mono) * 1e3
+                ),
+                "target_age_ms": self.shared.get_freshness()["target_age_s"] * 1e3,
+                "stale_status": "STALE_INPUT",
+            },
+        )
+
     def _drag_c(self, params):
         """µN/(mm/s)——由黏度与珠径计算（与 dipole_solver.drag_uN_per_mm_s 同式）"""
         eta = params.get("viscosity_mPas", 1000.0)
@@ -544,7 +651,10 @@ class ControlWorker(threading.Thread):
 class CurrentExecutor:
     """30Hz 电流执行层：目标插值 → 斜率限幅 → 量化 → RL 估计 → 正向模型 → 诊断"""
 
-    def __init__(self):
+    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+        self.clock = clock  # None inherits the SharedState monotonic domain
+        self.stale_status = "FRESH"
+        self.target_age_s = 0.0
         self.seq = -1
         self.I_from = np.zeros(6)  # 上一目标（A）
         self.I_to = np.zeros(6)  # 当前目标（A）
@@ -561,7 +671,18 @@ class CurrentExecutor:
         self, shared: SharedState, dt, pos_m, solver, last_sent, max_cmd=cfg.CMD_MAX
     ):
         """每 30Hz 帧调用。返回 (cmd_sent, diag dict)。"""
-        tgt, seq, _, _ = shared.get_I_target()
+        tgt, seq, _, snapshot = shared.get_I_target()
+        now = (self.clock if self.clock is not None else shared.clock)()
+        self.target_age_s = max(0.0, now - snapshot["t_mono"])
+        self.stale_status = target_status(self.target_age_s)
+        if self.stale_status != "FRESH":
+            # Do not accept even an unseen expired seq or advance interpolation.
+            # RL/forward diagnostics continue for the actually held command.
+            diag = self.update_est(dt, pos_m, solver, last_sent)
+            diag["interp_alpha"] = min((self.frames_since + 1) / 3.0, 1.0)
+            diag["stale_status"] = self.stale_status
+            diag["stop_requested"] = self.stale_status == "STALE_TARGET_TIMEOUT"
+            return diag
         if seq != self.seq:
             self.I_from = np.array(last_sent, float) * solver.current_gain
             self.I_to = np.asarray(tgt, float)

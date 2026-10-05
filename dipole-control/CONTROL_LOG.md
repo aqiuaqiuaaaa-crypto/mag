@@ -4,9 +4,9 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 选 `run.csv` 时，一个会话产生：
 
-- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，95 列。
-- `run.worker.csv`：每次完成的 MPC/solver 诊断一行，约 10 Hz，46 列；原有手动导出 MPC CSV 的格式和内容保留。
-- `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。`R_force_model_to_camera` 是 model XY → camera world XY 的正交映射；`offset.position_mm` 保存当前 `frame_offset_mm` 的 XY 与固定 z=0，来源为 `config.FRAME_OFFSET_MM`，含义是模型原点在相机世界坐标中的位置（默认 `[0,0]`，尚未实机标定）。ADC offset 仍为 `0/default`，原有像素中心也保留；未增加 CSV 字段。
+- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，98 列。
+- `run.worker.csv`：每次完成的 MPC/solver 诊断或 STALE_INPUT 跳过事件一行，约 10 Hz，48 列；原有手动导出 MPC CSV 的格式和内容保留。
+- `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。`R_force_model_to_camera` 是 model XY → camera world XY 的正交映射；`offset.position_mm` 保存当前 `frame_offset_mm` 的 XY 与固定 z=0，来源为 `config.FRAME_OFFSET_MM`，含义是模型原点在相机世界坐标中的位置（默认 `[0,0]`，尚未实机标定）。ADC offset 仍为 `0/default`，原有像素中心也保留；freshness 门槛由现有 config 快照记录。
 - `run.summary.json`：正常结束时两个流分别的 attempted / accepted / written / dropped / rejected 和日志错误。
 
 四个文件均用 `x` 模式创建；任何一个已经存在都会报日志错误，不覆盖。CSV/JSON 写入、flush、Git 查询只在独立 daemon 线程执行。默认队列 2048 行，主线程和 worker 只提交标量快照，使用 `put_nowait`；队列满只增加对应流 dropped，之后可以恢复。目标关联缓存另有 128 项上限。
@@ -18,6 +18,7 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 | 时间 | `t_mono`, `t_wall`, `tick` | float 秒（monotonic 主时间轴）、float Unix 秒（人工换算 wall-clock）、int GUI 生命周期 tick 序号 |
 | 时间/性能 | `dt_ms`, `jitter_ms`, `total_ms`, `vision_ms`, `estimator_ms`, `controller_ms`, `serial_ms`, `dropped` | float ms；dropped 为 int、两个流累计溢出数。dt 沿用原控制的 wall-clock/clamped dt；jitter 沿用原有绝对偏差；total 沿用 render/status/log capture **之前**的计时；serial_ms 是最近一次 send_commands 耗时，无发送时保持 |
 | 状态 | `mode`, `tracking` | string 模式、bool 追踪状态 |
+| Freshness | `kalman_age_ms`, `target_age_ms`, `stale_status` | float ms / string；全部 age 基于内部 monotonic。输入尚未发布时 kalman age 留空；target age 是本 tick executor 检查的目标年龄，executor 未运行时取最新发布目标。发送/heartbeat 不刷新 age；seq 仍表示实际采用的目标 |
 | 视觉 | `frame_ok`, `detected`, `px_x`, `px_y`, `area_px` | bool 帧可用/检出，float 像素/像素面积；直接使用当前检测结果 |
 | 测量 | `meas_x_mm`, `meas_y_mm` | float mm；直接复制 estimate_state 已转换的 z，失检留空，不再转换坐标 |
 | 估计 | `kf_x`, `kf_y`, `kf_vx`, `kf_vy`, `estimator_mode` | float mm / mm/s，string RAW/EMA/KALMAN；kf 字段仅 KALMAN 模式填入 |
@@ -29,7 +30,7 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 | 模型 | `I_est_0`…`I_est_5`, `F_est_x`, `F_est_y`, `F_est_z`, `B_x`, `B_y`, `B_z`, `B_mag_mT`, `align_ratio`, `low_field` | float A / µN / T / mT / 无量纲，bool 低场；来自已有执行器/R-L 诊断，不重新 forward_model；executor 未更新时保持上次模型值，并由 executor_updated 标明 |
 | ADC | `adc_frame_count`, `adc_age_ms`, `raw0`…`raw5`, `adc_valid`, `adc_running`, `adc_error_flags` | int MCU frame_count、float 距 PC 最近收到快照的 ms、int raw/状态/flags；仅监测，不转换成 A、不进入控制 |
 
-空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
+空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode/stale_status 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
 
 `I_target` 是 solver 发布的目标电流；`I_est` 是 R-L 估计；`raw` 是未标定 ADC。三者用途和单位不同。通道顺序保持 a0…a5 / `+X,+Y,+Z,-X,-Y,-Z` / Pole `1,3,5,4,6,2`。
 
@@ -37,13 +38,27 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 | 分组 | 字段 | 含义 |
 |---|---|---|
-| 时间/关联 | `t_mono`, `t_wall`, `run`, `seq`, `dropped`, `kalman_age_ms` | monotonic / wall-clock，按 run+seq 联表；kalman_age_ms 使用已有 wall-clock 状态时间戳，在 worker 完成时计算，仅用于诊断 |
+| 时间/关联 | `t_mono`, `t_wall`, `run`, `seq`, `dropped`, `kalman_age_ms`, `target_age_ms`, `stale_status` | monotonic / wall-clock，按 run+seq 联表；kalman_age_ms 为本周期实际消费输入的 monotonic age（即使已有更新输入也不冒充新输入），target_age_ms 为观察时最新发布目标的 monotonic age |
 | MPC 输入 | `x0_x`, `x0_y`, `d_used_x`, `d_used_y`, `F_prev_x`, `F_prev_y`, `F_prev_z` | 当前准静态 MPC 的位置 x0（mm）、已有扰动力输入和 F_prev（µN）；不虚构四状态预测模型 |
 | 目标/路径 | `F_target_x`, `F_target_y`, `F_target_z`, `ref_x`, `ref_y`, `vref_x`, `vref_y`, `s_progress`, `I_target_0`…`I_target_5` | 直接复制已有 MPC、参考窗口、solver 输出 |
 | 参数/性能 | `mpc_ms`, `solver_ms`, `mpc_cost`, `horizon`, `w_pos`, `w_vel`, `w_u`, `w_du`, `fmax`, `max_cmd`, `force_error_uN` | 当前实际 MPC 实例权重/限制与已有求解计时/误差 |
 | 可行性 | `converged`, `current_constraint_active`, `field_constraint_active`, `direction_constraint_active`, `sparse_infeasible`, `current_bound_ok`, `slew_ok`, `actuation_condition` | 复制 solver 已有 bool 标记和数值条件数；没有该字段时留空 |
 
 当前 metadata 是**开始时**快照；实验途中 GUI 参数变更不生成新的 metadata。worker 行包含实际使用的 MPC 权重/限制，30 Hz 行包含当前模式/max_cmd。为完整保留不同实验配置，应分别开始新记录会话。
+
+## Freshness 语义（2026-10-06）
+
+SharedState 自行记录输入/参数/目标的 monotonic 时间，旧 wall-clock `t` 仅保留兼容显示/日志。SharedState、worker、executor 可注入同一 clock；GUI 的控制日志时间轴也使用该 clock。worker 在输入读取时和目标正式发布时两次检查输入年龄；过期或 seq 被另一发布抢先更新时，不增加 seq、不覆盖新目标。参数快照记录 monotonic 时间，但参数本身为持久配置，本轮不另加参数过期策略。
+
+| 门槛 | 边界行为 |
+|---|---|
+| `KALMAN_STALE_S=0.15` | age ≤0.15 s 可求解；>0.15 s 或尚无输入时 STALE_INPUT，不逆解、不发布、不记 solver_error；fresh 输入后自动恢复 |
+| `TARGET_STALE_HOLD_S=0.30` | target age ≤0.30 s 保留原执行数学；>0.30 至 ≤1.00 s 为 STALE_TARGET，不采用过期 seq、不推进插值，保持最后成功命令；既有 R-L/正向诊断按保持命令更新 |
+| `TARGET_STALE_STOP_S=1.00` | target age >1.00 s，在 GUI 下一次检查时请求现有 normal_stop；随后按原 slew 归零，状态 STALE_TARGET_TIMEOUT，不急停 |
+
+三个数值仅为当前保守软件门槛，尚未实机标定。视觉丢失时不会因 KF 预测而续期 SharedState 输入；原视觉丢失 >1 s 正常停止保留，计时改用 monotonic。过期暂停期间重复最后成功帧，不刷新目标年龄、不改变 serial/heartbeat 实现。超时状态在正常归零后保留供诊断，下一次 tracking 启动复位；freshness 不阻止其他既有手动模式入口。
+
+STALE_INPUT 的 worker 事件沿用当前 run/seq，MPC/solver/target 列留空，表示本周期未计算、未发布；不能把它统计为一个新目标。正常 worker 行为 FRESH，只有成功目标发布才增加 seq。30 Hz 同时存在 input/target 失效时，显示优先级为 target timeout → stale target → stale input → fresh。FRESH 的非 tracking 行表示当前模式不使用该共享控制目标，不应把其 age 当作正在执行的 AUTO_TRACK 数据。
 
 ## 计数与故障
 
