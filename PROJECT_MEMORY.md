@@ -2,6 +2,19 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 正式 firmware build / release SOP（2026-10-06）
+
+- 起始HEAD=`8ad47f5192f13c531cdffab8704e0edf93d14bf3`，tracked clean、仅artifacts未跟踪。本次独立checkpoint为`build: enforce canonical firmware artifact consistency`，仅流程工具/测试/SOP/记忆；不push、不烧录。
+- 历史RCA：watchdog的tracked source→staging Rebuild→artifacts验证成功，但没有canonical发布/一致性门槛，原工程HEX仍旧；属于canonical artifact consistency gap，不是uvprojx/Generate HEX/source list/build失败/restore旧HEX的问题。保留原prepare_build.py/verify_protection.py和历史HARDWARE_SOP等全部证据，不重写isolated validation流程。
+- 已找到2026-10-06 `artifacts/firmware-clean-build-20261006/clean-build.ps1`：真实原工程构建但为依赖日期目录/clean-plan的一次性脚本。将其流程和既有verify_image.py核验逻辑整理为受Git管理的`tools/firmware/clean-build.ps1`及静态helper；历史脚本不改、不重复当作正式入口执行。
+- **Official：ORIGINAL project→clean Rebuild→canonical verification→artifacts freeze→SHA equality**。固定project=`pwm_double20260926DC6output/MDK-ARM/pwm_02.uvprojx`、target=pwm_02、MCU=STM32F407IGT6；canonical HEX/AXF/MAP=`MDK-ARM/pwm_02/pwm_02.{hex,axf,map}`。staging/delivery副本不能成为official输入；配置改变/custom hook开启默认停止审查。
+- Preflight记录HEAD/tracked状态/uvprojx SHA/target/MCU/时间/firmware输入SHA；tracked firmware staged/unstaged dirty均停止，不提交或丢弃。旧generated output先记录/归档再clean，tracked scatter保留；Rebuild前HEX/AXF/MAP全部不存在，之后三份非空且mtime处于本轮build窗口。只使用UV4 -r，无Download；0 errors、warnings及完整canonical build.log保留。
+- Canonical静态核验复用HEX校验/AXF与fromelf BIN字节一致、@ADC/live current_sense/uart_telemetry/ADC/TIM3/DMA/watchdog/MAP/cross-ref/CTRL_SD代码证据；单独static PASS不等于release。通过后仅canonical→新artifacts冻结，重新计算canonical/frozen/verified SHA三方相等（HEX硬门槛，AXF/MAP同查），否则FAIL。manifest记录路径/size/mtime/SHA/HEAD/project/tool/build时间/errors/warnings/门槛状态；只有全部通过才status=PASS。脚本不stage任何文件，不自动授权烧录。
+- 正式规范为[FIRMWARE_BUILD_SOP.md](FIRMWARE_BUILD_SOP.md)，覆盖并区分历史日期README/HARDWARE_SOP的artifact选取说明。DryRun命令：`powershell -NoProfile -ExecutionPolicy Bypass -File tools/firmware/clean-build.ps1 -DryRun`；逻辑测试入口为`tools/firmware/test_clean_build.ps1`。
+- 本次17项纯逻辑/DryRun全部通过：canonical/original路径、staging拒绝、dirty firmware、stale清理、缺失/空/过期HEX、absence证明、SHA不等FAIL/相等PASS/核验后替换拒绝、tracked scatter/未知文件保护、errors/warnings、无Git stage/Download、DryRun保持canonical和暂存区。另4项static故障注入及现有canonical静态核验通过；新Python helper Ruff/Black/mypy strict通过。未实际执行新入口的Keil Rebuild分支，不冒充新的端到端构建成功。
+- 本次无需重复Keil Rebuild：已有原工程clean-build证据足够核验流程门槛，fromelf只读取现有AXF并在新artifacts写分析BIN/反汇编。canonical HEX仍46,798bytes、mtime=`2026-10-06 14:50:45.781467+08:00`、SHA=`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`。firmware/uvprojx/PC control source及历史构建脚本全未变；本任务没有产生新HEX、没有烧录/下载/硬件操作。
+- 新流程测试/静态/protection/diff/checkpoint证据在`artifacts/canonical-release-sop-20261006/`；独立测试fixture也仅在artifacts，不纳入Git。旧clean-build/validation证据保留，artifacts继续untracked。
+
 ## 最新权威摘要（2026-10-06：FirstOrderESO measurement gap 保留扰动）
 
 - 起始 HEAD=`a2716e1e9b2c97b091a98c39eef660801019e942`，tracked clean、仅 artifacts 未跟踪；本次独立 checkpoint 为 `fix: preserve eso disturbance across measurement gaps`，不 push。
