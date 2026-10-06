@@ -59,6 +59,7 @@ def test_full_chain_vision_gap_recovery(
     trace = result["trace"]
     assert not result["diverged"] and result["max_delta_cmd"] <= 9
     assert any(r["worker_status"] == "STALE_INPUT" for r in trace)
-    assert trace[69]["d_hat_uN"] == [0, 0]
-    assert np.linalg.norm(trace[70]["d_hat_uN"]) < 5
+    # Intentional semantic change: a nine-frame gap reanchors position only.
+    assert trace[69]["d_hat_uN"] == trace[59]["d_hat_uN"]
+    assert np.linalg.norm(np.subtract(trace[70]["d_hat_uN"], trace[69]["d_hat_uN"])) < 1
     assert 0.8 < result["mean_path_speed_mm_s"] < 1.2

@@ -1286,6 +1286,7 @@ class MagneticDipoleControl(QMainWindow):
         )
         eg.addWidget(self.combo_eso, 4, 1)
         self.combo_eso.currentTextChanged.connect(self._reset_controllers)
+        self.chk_eso.toggled.connect(self._restart_first_order_eso)
         v.addWidget(eso_box)
 
         kal_box = QGroupBox("状态估计（视觉）")
@@ -2739,6 +2740,11 @@ class MagneticDipoleControl(QMainWindow):
         self.eso_y = self._make_eso()
         self.z3 = np.zeros(2)  # compatibility vector: disturbance force for either ESO
 
+    def _restart_first_order_eso(self, enabled: bool) -> None:
+        """Enable changes restart FirstOrderESO; keep legacy toggle behavior."""
+        if self.combo_eso.currentText() == "first_order":
+            self._reset_controllers()
+
     def _eso_mode(self) -> str:
         return self.combo_eso.currentText() if self.chk_eso.isChecked() else "off"
 
@@ -3223,9 +3229,6 @@ class MagneticDipoleControl(QMainWindow):
                 )
         else:
             self.z3[:] = 0.0
-            for observer in (self.eso_x, self.eso_y):
-                if isinstance(observer, FirstOrderESO):
-                    observer.mark_gap()  # re-enable cannot consume an unobserved interval
         self.shared.set_kalman(pos, self.state_vel_mm, now)
         self.shared.set_last_sent(self.last_sent_cmd)
         self._publish_mpc_params(now)

@@ -482,6 +482,7 @@ def test_parent_2a_legacy_golden(
         base=PARENT,
         controller_mode="L3",
         target_box_delta=27,
+        include_vision_gap=False,  # L3 continuity is checked by the gap regressions.
     )
 
 

@@ -70,6 +70,7 @@ def run_simulation(
     ticks: int = 240,
     noise: bool = True,
     vision_gap: bool = False,
+    dropout_fraction: float = 0.0,
     profile: str = "defaults",
     target_box_delta: int = 9,
     interpolation_mode: str = "legacy_three_frame",
@@ -133,6 +134,7 @@ def run_simulation(
     worker = widget.worker
     # No floating wall-clock is used by the harness; production stop/freshness is.
     rng = np.random.default_rng(seed)
+    dropout_rng = np.random.default_rng(seed + 1)
     physical_current = np.zeros(6)
     dt = 1 / cfg.CONTROL_HZ
     trace = []
@@ -140,7 +142,9 @@ def run_simulation(
     for tick in range(ticks):
         clock.now = 1000 + tick * dt
         position = plant.pos * 1e3
-        missing = vision_gap and 60 <= tick < 69
+        missing = (vision_gap and 60 <= tick < 69) or (
+            dropout_fraction > 0 and dropout_rng.random() < dropout_fraction
+        )
         if missing:
             widget.bead = None
         else:

@@ -107,7 +107,8 @@ def test_gap_reanchors_without_force_impulse(gap: str) -> None:
     elif gap == "initial":
         eso.initialized = False
     dt = np.nextafter(cfg.KALMAN_STALE_S, math.inf) if gap == "large_dt" else DT
-    assert eso.step(float(dt), 10000, -40) == 0
+    # Measurement gaps preserve force; only initialization is a full reset.
+    assert eso.step(float(dt), 10000, -40) == (0 if gap == "initial" else 7)
     assert eso.z1 == 10000
     assert eso.step(DT, 10000 + DT * (-40 + 3) / C, -40) > 0
 
@@ -120,7 +121,7 @@ def test_allowed_discrete_grid_and_schur_boundary() -> None:
                 eso = observer(float(omega))
                 eso.reset()
                 eso.z2 = 7
-                assert eso.step(float(dt), 10000, -40) == 0
+                assert eso.step(float(dt), 10000, -40) == 7
                 assert eso.z1 == 10000
                 continue
             steps = max(1, math.ceil(dt * omega / 0.5))

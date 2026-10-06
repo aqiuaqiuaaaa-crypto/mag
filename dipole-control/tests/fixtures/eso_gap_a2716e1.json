@@ -1,0 +1,44 @@
+{
+  "parent": "a2716e1e9b2c97b091a98c39eef660801019e942",
+  "seed": 20261006,
+  "no_gap": {
+    "defaults-nominal": {
+      "trace_sha256": "57fb3fc031d96c41507fffa74ee7eaf9f1dfc3396634f258fb3b26ca06c9fdd5"
+    },
+    "defaults-friction": {
+      "trace_sha256": "0f5d3de93bfac7a54e6594e29d16d470aa3aa0c136dc5c53c08cc940f04d9223"
+    },
+    "defaults-drag": {
+      "trace_sha256": "2b0a5f741c3cbd854a642012ee278f5951321032d4594d37b0eee83c4d8e3f26"
+    },
+    "defaults-friction_drag": {
+      "trace_sha256": "e678fa107efee93538ba0ad3444b2900668da389e088cdc9330487d398128fa5"
+    },
+    "saved-nominal": {
+      "trace_sha256": "378f3eea25bf8093f5dbe4d85bc52a5e15093acf78d8a7ec1b1249bc68214917"
+    },
+    "saved-friction": {
+      "trace_sha256": "7c6ca53cb67b6f479e3fc1148afb5d1f3b56c7bda9765e583d6cd5fa471d642b"
+    },
+    "saved-drag": {
+      "trace_sha256": "6d521377a6b766a6281e196806f2f89c86b561ba2989fc6661ccc9ae5cfae56e"
+    },
+    "saved-friction_drag": {
+      "trace_sha256": "b0a647ab7f7297937f8795be5f096e7ea340f61a189571a68dbcd10429f50431"
+    }
+  },
+  "gap": {
+    "0.01": {
+      "mean_path_speed_mm_s": 0.8548242332802003,
+      "tracking_rms_mm": 1.2208654616318464
+    },
+    "0.03": {
+      "mean_path_speed_mm_s": 0.6705827980325223,
+      "tracking_rms_mm": 2.4114241331597883
+    },
+    "0.1": {
+      "mean_path_speed_mm_s": 0.5952281673527519,
+      "tracking_rms_mm": 3.314796267035598
+    }
+  }
+}

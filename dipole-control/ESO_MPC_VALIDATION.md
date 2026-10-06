@@ -40,7 +40,7 @@ trace(M)=2−2h−h², det(M)=1−2h
 Schur/Jury 条件：0<h<sqrt(8)−2≈0.828427124746
 ```
 
-有效更新按 ceil(dt*ω/0.5) 个子步，保证 h≤0.5；量测在上次有效位置与本次量测之间线性插值，u保持上一执行模型值。网格覆盖 GUI允许 omega=.5…20、dt=.005… .2（40×40）；dt≤.15 的1200组合验证矩阵谱半径<1与恒定d收敛，其余400组合验证重置。视觉缺口 mark_gap，或 dt>.15（复用 input freshness 门槛）时，只重置位置、清零扰动，不把巨大恢复创新灌入d。下一有效帧正常恢复；ESO off→on也重新锚定。原 freshness/停止流程未改变。omega=4沿用软件默认，未实机标定。
+有效更新按 ceil(dt*ω/0.5) 个子步，保证 h≤0.5；量测在上次有效位置与本次量测之间线性插值，u保持上一执行模型值。网格覆盖 GUI允许 omega=.5…20、dt=.005… .2（40×40）；dt≤.15 的1200组合验证矩阵谱半径<1与恒定d收敛，其余400组合验证位置重锚。2026-10-06 gap 修复后，视觉缺口 mark_gap 或 dt>.15（复用 input freshness 门槛）只重锚 z1、保留 z2，不把未知缺口变成力创新；首次初始化、显式 reset、FirstOrderESO off→on、新 tracking 和模式切换才清零扰动。原 freshness/停止流程未改变。omega=4沿用软件默认，未实机标定。
 
 ## MPC H/g 推导与当前 κ
 
@@ -118,7 +118,7 @@ L0=legacy+absolute，L1=off+absolute，L2=off+steady_state，L3=first_order+stea
 
 全部32组无明显发散，最大command变化≤9/帧、每组240条43-byte帧、Fmax force饱和率0。command reversal、横向RMS、solver状态、各tick模式和freshness保存在simulation-results/trace中；config默认场方向−Z，保存配置为+Z，Br/gain/lift也不同，不能混用两表解释。config默认测试的command到±50比例较高（71%–93%），与MPC Fmax饱和不同；保存配置这组仿真未到command上限。未为此改场目标、电流限制、增益、Fz或任何物理值。
 
-L0 nominal 的legacy d_hat明显非真实d，速度可超过目标，是错误observer与absolute偏置耦合的补偿，不能据其速度视作正确物理模型。L1/L2在摩擦/增阻下不估d；L3给出一致的扰动力与必要力。L3也不保证每个指标都优于所有其他组：噪声、执行器与有限视界仍会产生tracking误差。额外L3 friction+drag视觉9帧缺口回归产生STALE_INPUT、停止新目标发布；第69帧恢复d_hat=[0,0]，后一帧未出现大扰动脉冲，后段速度恢复且无发散。
+L0 nominal 的legacy d_hat明显非真实d，速度可超过目标，是错误observer与absolute偏置耦合的补偿，不能据其速度视作正确物理模型。L1/L2在摩擦/增阻下不估d；L3给出一致的扰动力与必要力。L3也不保证每个指标都优于所有其他组：噪声、执行器与有限视界仍会产生tracking误差。首轮额外L3 friction+drag视觉9帧缺口回归产生STALE_INPUT、停止新目标发布；历史第69帧恢复d_hat=[0,0]。这是本次纠正的旧语义，当前正式期望为恢复帧保持缺口前 d_hat，详细配对结果见文末。
 
 ## 父checkpoint逐位等价与保护
 
@@ -165,3 +165,27 @@ FirstOrderESO可执行行跟踪：44/44（100.00%）；新结构/模式正式回
 首轮全量multirate中test_solver_no_block测得60.5ms，超过原60ms门槛（17/18）；initial-final-multirate日志和initial-regressions.json保存。独立复测18/18，最终整组18/18；未改调度或阈值，不把偶发失败隐藏为首测通过。首次单元对照收敛时间和测试导入/类型/格式问题已修正；未改变legacy数学。静态检查保留原untyped GUI方法提示；新增observer单独strict通过，不能称全工程strict。
 
 全部验证通过后独立checkpoint `fix: align eso and mpc steady-state dynamics`，不push。最终diff/stat/status和commit结果保存在artifacts/eso-mpc-20261006；artifacts不提交。未操作真实COM/相机/实板，没有构建或烧录新固件。
+
+## Measurement gap 与 lifecycle reset 分离（2026-10-06）
+
+起始 HEAD=`a2716e1e9b2c97b091a98c39eef660801019e942`，tracked clean、仅 artifacts 未跟踪。根因是 FirstOrderESO.step 将未初始化、mark_gap 和 dt>max_dt 合并调用清零 z2 的 reset；GUI 还把 disable 当成普通 gap。当前修复将位置重锚与生命周期重置分开：mark_gap 只置 pending 标记；下一有效帧或 dt>0.15 s 重锚 z1/上次量测，z2 保持原值，当帧不预测/校正未知区间。reset 明确清零 z2；FirstOrderESO checkbox 切换通过独立 slot 新建 observer，覆盖 OFF→ON 全部发生在两个 tick 之间的情况。新 tracking、模式切换原新建行为保持；legacy ESO1D/fal/Kalman 原文及 legacy checkbox 行为保持。
+
+先加测试再改生产实现，修复前 15 fail/3 pass 保存在 red.log。恒定非零扰动覆盖单帧、3/15/29 帧（0.1/0.5/约1s）缺口，恢复位置正确且扰动连续；显式 reset/新 observer、checkbox 有/无 disabled tick、tracking 重启、mode switch、摩擦/运动反转再收敛及 0.15 严格边界、0.16/0.25/0.30/0.300001/0.5/0.99 s 均有正式回归。
+
+随机漏检复用完整生产 GUI/Kalman/MPC/solver/executor 与现有 BeadSimulator，不另造控制器；保存 GUI profile、box27、原插值/物理值、friction_drag、360 个30Hz帧/12s、独立150Hz plant，视觉 seed=20261006、独立 dropout seed=20261007。dropout 默认关闭，随机数流与原视觉噪声分开；先冻结未改生产源码的基线，再登记速度0.95–1.05、速度误差≤父基线40%、tracking RMS≤父基线75%、恢复扰动逐位连续及 slew≤9 的门槛。没有根据修复后结果放宽。
+
+| random dropout | 父均速 mm/s | 修复均速 mm/s | 父 tracking RMS mm | 修复 RMS mm |
+|---:|---:|---:|---:|---:|
+| 1% | 0.854824 | 1.008225 | 1.220865 | 0.522404 |
+| 3% | 0.670583 | 1.006510 | 2.411424 | 0.731807 |
+| 10% | 0.595228 | 1.006912 | 3.314796 | 0.843412 |
+
+三组同时达到期望的 1.00±0.02 mm/s；分别3/12/30次恢复保持 d_hat 连续，无数值发散。当前父HEAD无 gap L3 的两profile×四工况，8组全部非计时 trace（位置/速度/dhat/force/current/cmd/progress/seq/solver状态）SHA逐位一致。原 L0 历史 replay 仍包含视觉缺口，保留逐位断言；旧 target-box/interpolation 的 L3 父回放仅排除 vision_gap 这一已明确变更的语义场景，其余场景保持逐位比较，gap 改由连续性测试和冻结父基线验证。
+
+当前 box27/defaults 的9帧缺口配对：恢复 d_hat 从旧 [0,0] 改为缺口前 [-8.800106,0.954641] µN，恢复跳变范数8.851734→0；恢复后30帧速度最大误差0.578233→0.279149 mm/s、RMS误差0.469050→0.114481 mm/s，目标力最大相邻跳变6.488875→0.987212 µN。STALE_INPUT/停止新目标发布/slew规则均保持；不要求所有后段指标单调变好，尾段均速1.022238→1.024344 mm/s。
+
+执行层边界：observer 对 >0.30 s 仍仅位置重锚并保留 z2，没有 MCU timeout 确认信号。正式 GUI tick 将 dt clamp 到0.005…0.2 s，故 >300 ms 真实停顿不能仅由 dt_ms 还原；0.25/0.30/>0.30 s GUI停顿回归验证实际 clamp 路径。MCU 300ms watchdog 若确实触发会 shutdown/恢复，原 R-L 模型和先验 disturbance 可能暂时过时；本修复不重构 watchdog、heartbeat 或执行模型，不证明执行力连续。控制语义、单元/GUI/闭环仿真支持本结论，尚未实机验证。
+
+最终ESO/MPC/unit/GUI65/65、gap simulation12/12、原闭环33/33、L0 replay2/2通过。全部24组回归最终通过，含frames/MPC/shared/solver/bead/CURT/stop/error/serial/freshness/log/path、target-box33+A/B16、interpolation87+闭环88、GUI smoke及host watchdog integration7/C29。multirate首轮17/18：原60ms门槛测得62.8ms；计算密集回归结束后独立复测18/18，失败证据保存在regressions-initial.json，未改阈值/调度/控制代码。error-paths保留10条既有绘图warning。Ruff/Black/full mypy均通过（45文件）；新FirstOrderESO独立strict通过，可执行行覆盖48/48（100%），不声称全GUI覆盖或全工程strict。
+
+证据保存在 artifacts/eso-gap-20261006（父输入/hash、红/绿测试、study-design、逐帧trace、nine-frame-comparison、质量/覆盖/保护/回归日志），不提交 artifacts。固件151个tracked文件、uvprojx与canonical HEX（SHA-256=88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a，大小/mtime）保持不变；未重新构建或烧录，未 push。

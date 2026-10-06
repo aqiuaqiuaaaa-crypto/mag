@@ -381,5 +381,11 @@ def test_9d0479e_legacy_box_binary_replay(
     app: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
 ) -> None:
     replay_checkpoint(
-        app, monkeypatch, tmp_path, profile, base=BASE, controller_mode="L3"
+        app,
+        monkeypatch,
+        tmp_path,
+        profile,
+        base=BASE,
+        controller_mode="L3",
+        include_vision_gap=False,  # Expected observer semantics change, not box logic.
     )

@@ -2,6 +2,22 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-06：FirstOrderESO measurement gap 保留扰动）
+
+- 起始 HEAD=`a2716e1e9b2c97b091a98c39eef660801019e942`，tracked clean、仅 artifacts 未跟踪；本次独立 checkpoint 为 `fix: preserve eso disturbance across measurement gaps`，不 push。
+- 根因：FirstOrderESO.step 把首次初始化、mark_gap、dt>0.15s 合并调用清零z2的reset；GUI disable也伪装成gap。现将 measurement continuity break 与 observer lifecycle restart 分离：视觉漏检只mark_gap，恢复帧/dt超限只重锚z1/上次量测、保留z2，当帧不预测/校正未知缺口；reset明确清零z2。FirstOrderESO checkbox每次切换新建observer，OFF→ON都发生于tick之间也清零；新tracking/mode switch沿用原新建行为。legacy ESO1D/fal/Kalman原文和legacy toggle行为不变。
+- 生产只修改estimators.py中的FirstOrderESO及主GUI必要接线/调用点；MPC权重/c/Q/R/solver/box27/interpolation/CurrentExecutor/R-L/CURT/ADC/serial heartbeat/path progress/frames/Fz/Br/gain/current PI全部保持。GUI仅_tab_advanced/mpc_track_step两处既有方法改变，新增_restart_first_order_eso；其余128既有方法源码相同。
+- 测试先于实现：红测试15 fail/3 pass；正式覆盖恒定非零扰动单帧/3/15/29帧缺口、0.15严格边界、0.16/.25/.30/.300001/.5/.99s、reset/新instance、checkbox有/无disabled tick、tracking重启/mode switch、legacy toggle、friction sign reversal再收敛。9帧旧期望d_hat=[0,0]已明确改为连续性语义。
+- 固定seed=20261006、独立dropout seed=20261007，复用完整生产控制链与现有friction_drag plant、保存GUI profile/box27/原插值/150Hz积分；每组360帧/12s，先冻结父基线，再登记均速.95–1.05、速度误差≤父40%、RMS≤父75%、恢复dhat逐位连续/slew≤9。1%/3%/10%漏检均速 **.854824→1.008225 / .670583→1.006510 / .595228→1.006912 mm/s**，全部达到期望1±.02；tracking RMS **1.220865→.522404 / 2.411424→.731807 / 3.314796→.843412 mm**，3/12/30次恢复均保留扰动，无发散。
+- 当前父HEAD无gap L3两profile×四工况的8组非计时trace SHA逐位一致。原L0两profile×8场景×normal/emergency，含视觉gap：3840 active+960 stop ticks、4856条UART帧和控制状态逐位一致。旧target-box/interpolation L3父golden只排除已改变语义的vision_gap，其他7场景仍逐位比较；gap由新连续性/配对基线验证。
+- 当前box27/defaults 9帧gap：恢复dhat保持[-8.800106,.954641]µN，清零跳变范数8.851734→0；恢复后30帧速度最大误差.578233→.279149、RMS .469050→.114481mm/s，目标力最大相邻跳变6.488875→.987212µN。尾段均速1.022238→1.024344mm/s，未声称所有指标都改善；STALE_INPUT/停止新目标发布/正常slew不变。
+- 日志保持106/56列，复用detected/eso_updated/d_hat/u_eso/dt_ms/eso_mode/tracking/run；GUI测试核验gap/恢复/dt gap/OFF→ON字段。tick采样不能还原两行之间的快速开关或外部reset，run也会随logger attach增加，不能仅凭零扰动/run判reset；未扩展日志系统。
+- **执行层限制**：直接dt>.30s仍只重锚保留z2；GUI控制dt clamp到.005… .2s，因此dt_ms不能还原>300ms真实停顿。没有MCU watchdog timeout确认信号；若实板确实shutdown/恢复，旧扰动与R-L估计可能过时。本轮仅修正observer测量语义，不重构watchdog/heartbeat，不能证明执行连续；尚未实机验证。
+- Ruff/Black/full mypy全部通过（45文件），新FirstOrderESO独立strict通过；observer可执行行48/48覆盖。专项ESO/MPC/GUI/unit65/65、no-gap/random/9frame simulation12/12通过。初次质量检查发现两项新测试lint和一处排版，已修正，初始日志保留。
+- 全部24组回归最终通过：原closed-loop33、L0 replay2、target-box33/A-B16、interpolation87/闭环88、GUI smoke与全部历史frames/MPC/shared/solver/bead/CURT/stop/error/serial/freshness/log/path、host watchdog integration7/C29。multirate首轮17/18（test_solver_no_block 62.8ms超过原60ms门槛），其他回归结束后独立复测18/18，未改门槛/调度；首轮失败证据regressions-initial.json与复测日志均保留。error-paths仍有10条既有绘图warning。
+- 保护：151个tracked固件文件和uvprojx原字节一致，canonical HEX SHA-256仍为`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`，46,798bytes、mtime原值2026-10-06 14:50:45.781467+08:00。firmware source diff=none；未调用Keil重构建/Download、未操作真实COM/相机/ST-Link/J-Link、未烧录/未push。历史watchdog C回归仅host桩编译执行，不产生MCU镜像。
+- 直接相关文档ESO_MPC_VALIDATION.md/CONTROL_LOG.md同步；证据在`artifacts/eso-gap-20261006/`（父snapshot/hash、预登记设计、红/绿/质量/覆盖/保护/回归日志、逐帧trace和配对指标），artifacts不提交。
+
 ## 最新固件权威产物（2026-10-06：当前源码原工程 clean build，仅构建与静态核验）
 
 - 本轮源码 HEAD=`75e02ccd44d2b3b62bb4215f247152c487e03cf9`（`refactor: make executor interpolation explicit`）；开始时 tracked clean，仅已有 `artifacts/` 未跟踪。`git diff 45f18be868285bb7d512b96e8e9f946dd7de9029 HEAD -- pwm_double20260926DC6output` 为空，151 个 tracked 固件文件自 command-watchdog checkpoint 后未变，与最新固件记忆一致。构建前后全部 213 个 tracked 文件 SHA-256 不变；最终仅本记忆新增文档记录。

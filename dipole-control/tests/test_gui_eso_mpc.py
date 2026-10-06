@@ -110,7 +110,7 @@ def test_previous_interval_force_not_future_target(
     np.testing.assert_array_equal(window.shared.get_params()["eso_d"], [2, 2])
 
 
-def test_gui_gap_and_off_reenable_clear_innovation(
+def test_gui_gap_preserves_force_and_off_reenable_resets(
     window: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clock, _ = start_tracking(window, monkeypatch)
@@ -124,7 +124,7 @@ def test_gui_gap_and_off_reenable_clear_innovation(
     window.state_pos_mm = np.array([100, 0])
     clock.now += 1 / 30
     window.mpc_track_step(1 / 30)
-    assert window.z3.tolist() == [0, 0]
+    assert window.z3.tolist() == [8, 0]
     window.chk_eso.setChecked(False)
     window.mpc_track_step(1 / 30)
     window.chk_eso.setChecked(True)
@@ -136,6 +136,121 @@ def test_gui_gap_and_off_reenable_clear_innovation(
     window.combo_eso.setCurrentText("legacy")
     assert isinstance(window.eso_x, ESO1D)
     assert window.kf.x.tobytes() == state
+
+
+@pytest.mark.parametrize("disabled_tick", [False, True])
+def test_first_order_toggle_is_full_reset_even_between_ticks(
+    window: gui.MagneticDipoleControl,
+    monkeypatch: pytest.MonkeyPatch,
+    disabled_tick: bool,
+) -> None:
+    start_tracking(window, monkeypatch)
+    window.eso_x.reset(0)
+    window.eso_x.z2 = 8
+    window.chk_eso.setChecked(False)
+    if disabled_tick:
+        window.mpc_track_step(1 / 30)
+    window.chk_eso.setChecked(True)
+    assert isinstance(window.eso_x, FirstOrderESO)
+    assert window.eso_x.z2 == 0 and not window.eso_x.initialized
+    window.state_pos_mm = np.array([200, 0])
+    window.mpc_track_step(1 / 30)
+    assert window.z3.tolist() == [0, 0] and window.eso_x.z1 == 200
+
+
+def test_new_tracking_and_mode_switch_discard_disturbance(
+    window: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    start_tracking(window, monkeypatch)
+    previous = window.eso_x
+    previous.reset(0)
+    previous.z2 = 8
+    window.start_tracking()
+    assert window.eso_x is not previous and window.eso_x.z2 == 0
+    window.eso_x.z2 = 8
+    state = window.kf.x.tobytes()
+    window.combo_eso.setCurrentText("legacy")
+    window.combo_eso.setCurrentText("first_order")
+    assert isinstance(window.eso_x, FirstOrderESO) and window.eso_x.z2 == 0
+    assert not window.eso_x.initialized and window.kf.x.tobytes() == state
+
+
+def test_legacy_toggle_keeps_historical_observer_state(
+    window: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configure_mode(window, "L0")
+    start_tracking(window, monkeypatch)
+    previous = window.eso_x
+    assert isinstance(previous, ESO1D)
+    previous.reset(1)
+    previous.z3 = 8
+    window.chk_eso.setChecked(False)
+    window.mpc_track_step(1 / 30)
+    window.chk_eso.setChecked(True)
+    assert window.eso_x is previous and previous.z3 == 8
+
+
+def test_existing_log_fields_show_gap_and_lifecycle_reset(
+    window: gui.MagneticDipoleControl,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    clock, _ = start_tracking(window, monkeypatch)
+    start_log(window, tmp_path / "gap.csv")
+    window.eso_x.reset(0)
+    window.eso_x.z2 = 8
+    window.z3[:] = [8, 0]
+    bead = window.bead
+
+    def record(dt: float) -> None:
+        clock.now += dt
+        window._begin_control_log_tick(clock.now, dt)
+        window.mpc_track_step(dt)
+        window._finish_control_log_tick(window.bead is not None)
+
+    window.bead = None
+    record(1 / 30)
+    window.bead = bead
+    window.state_pos_mm = np.array([100, 0])
+    record(1 / 30)
+    window.state_pos_mm = np.array([200, 0])
+    record(0.16)
+    window.chk_eso.setChecked(False)
+    record(1 / 30)
+    window.chk_eso.setChecked(True)
+    record(1 / 30)
+    finish_log(window)
+    assert window.control_logger is not None
+    records = rows(window.control_logger.path)
+    assert records[0]["detected"] == "False"
+    assert records[0]["eso_updated"] == "False"
+    assert records[0]["u_eso_x"] == "" and float(records[0]["d_hat_x"]) == 8
+    assert records[1]["eso_updated"] == "True"
+    assert float(records[1]["d_hat_x"]) == float(records[2]["d_hat_x"]) == 8
+    assert float(records[2]["dt_ms"]) == 160
+    assert records[3]["eso_mode"] == "off" and records[3]["eso_updated"] == "False"
+    assert records[4]["eso_mode"] == "first_order"
+    assert float(records[4]["d_hat_x"]) == 0
+
+
+@pytest.mark.parametrize("pause", [0.16, 0.25, 0.30, 0.300001, 0.5])
+def test_gui_tick_dt_clamp_preserves_force_but_is_not_watchdog_confirmation(
+    window: gui.MagneticDipoleControl,
+    monkeypatch: pytest.MonkeyPatch,
+    pause: float,
+) -> None:
+    clock, _ = start_tracking(window, monkeypatch)
+    assert window.worker is not None
+    window.eso_x.reset(0)
+    window.eso_x.z2 = 8
+    before = 1000.0
+    window.last_time = before
+    monkeypatch.setattr(gui.time, "time", lambda: before + pause)
+    clock.now += 1 / 30
+    window.worker._step()
+    window.tick()
+    assert window.z3[0] == 8
+    assert window.eso_x.z1 == window.state_pos_mm[0]
 
 
 def test_live_effort_mode_refresh(

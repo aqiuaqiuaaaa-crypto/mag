@@ -119,8 +119,9 @@ class FirstOrderESO:
 
     One correction is Schur stable for 0<T*omega<sqrt(8)-2. Subintervals
     bound T*omega to 0.5, with linearly interpolated measurements and held u.
-    A missing vision sample or dt beyond max_dt reanchors position and clears
-    disturbance on recovery; unknown gap dynamics cannot become an innovation.
+    A missing vision sample or dt beyond max_dt reanchors position, preserving
+    learned disturbance; unknown gap dynamics cannot become an innovation.
+    reset() is a separate lifecycle restart that also clears disturbance.
     omega is a software setting, not a measured hardware bandwidth.
     """
 
@@ -150,16 +151,20 @@ class FirstOrderESO:
         self._gap = False
 
     def reset(self, x0: float = 0.0) -> None:
-        """Anchor measured position and clear disturbance at start/recovery."""
+        """Restart the observer lifecycle, discarding previous disturbance."""
         if not math.isfinite(x0):
             raise ValueError("position must be finite")
-        self.z1 = self._last_y = float(x0)
         self.z2 = 0.0
+        self._reanchor(float(x0))
+
+    def _reanchor(self, position: float) -> None:
+        """Restore measurement continuity without changing disturbance force."""
+        self.z1 = self._last_y = position
         self.initialized = True
         self._gap = False
 
     def mark_gap(self) -> None:
-        """Require reanchoring on the next valid vision sample."""
+        """Re-anchor the next valid sample, preserving learned disturbance."""
         self._gap = True
 
     def step(self, dt: float, x_meas: float, u: float) -> float:
@@ -167,8 +172,11 @@ class FirstOrderESO:
         dt, y, u = float(dt), float(x_meas), float(u)
         if not all(math.isfinite(value) for value in (dt, y, u)) or dt <= 0:
             raise ValueError("dt must be positive; dt, measurement and u finite")
-        if not self.initialized or self._gap or dt > self.max_dt:
+        if not self.initialized:
             self.reset(y)
+            return self.z2
+        if self._gap or dt > self.max_dt:
+            self._reanchor(y)
             return self.z2
         steps = max(1, math.ceil(dt * self.omega0 / 0.5))
         interval = dt / steps

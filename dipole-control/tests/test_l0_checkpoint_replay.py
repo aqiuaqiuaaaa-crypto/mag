@@ -182,6 +182,7 @@ def replay_checkpoint(
     base: str = BASE,
     controller_mode: str = "L0",
     target_box_delta: int = 9,
+    include_vision_gap: bool = True,
 ) -> None:
     parent = load_parent(monkeypatch, base)
     old_gui, old_multi = parent["magnetic_dipole_pid"], parent["multirate"]
@@ -210,6 +211,8 @@ def replay_checkpoint(
             "vision_gap",
             *[m for m in ACTIVE_MODES if m != "tracking"],
         ):
+            if mode == "vision_gap" and not include_vision_gap:
+                continue  # L3 gap semantics have dedicated continuity regressions.
             for stop in ("normal_stop", "emergency_stop"):
                 clock = [1000.0]
                 windows = [
@@ -336,6 +339,7 @@ def replay_checkpoint(
         "controller_mode": controller_mode,
         "target_box_delta": target_box_delta,
         "profile": profile,
+        "include_vision_gap": include_vision_gap,
         "status": "PASS",
         "cases": cases,
         "frames": sum(c["frames"] for c in cases),

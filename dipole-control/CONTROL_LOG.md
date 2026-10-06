@@ -23,7 +23,7 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 | 测量 | `meas_x_mm`, `meas_y_mm` | float mm；直接复制 estimate_state 已转换的 z，失检留空，不再转换坐标 |
 | 估计 | `kf_x`, `kf_y`, `kf_vx`, `kf_vy`, `estimator_mode` | float mm / mm/s，string RAW/EMA/KALMAN；kf 字段仅 KALMAN 模式填入 |
 | 当前估计器输出 | `state_x_mm`, `state_y_mm`, `state_vx_mm_s`, `state_vy_mm_s` | float mm / mm/s；记录 RAW/EMA/KALMAN 实际供控制使用的输出 |
-| ESO | `eso_mode`, `eso_updated`, `d_hat_x`, `d_hat_y`, `u_eso_x`, `u_eso_y` | string first_order/legacy/off、bool 本 tick 是否 step、float µN；u 是上一执行帧的 camera-world R-L/MDM 估计力（last_F_actual），不是未来 F_target，也不是 CURT 测量。未 step 留空；d_hat 是统一扰动力向量，新 ESO 来自 z2，legacy 来自 z3。恢复帧 step 可能只重置位置并清零扰动 |
+| ESO | `eso_mode`, `eso_updated`, `d_hat_x`, `d_hat_y`, `u_eso_x`, `u_eso_y` | string first_order/legacy/off、bool 本 tick 是否 step、float µN；u 是上一执行帧的 camera-world R-L/MDM 估计力（last_F_actual），不是未来 F_target，也不是 CURT 测量。未 step 时 u 留空；d_hat 是统一扰动力向量，新 ESO 来自 z2，legacy 来自 z3。measurement gap 恢复帧 step 仅重锚位置并保留扰动；生命周期初始化才清零 |
 | MPC 用力中心 | `effort_mode`, `F_ss_x`, `F_ss_y` | string absolute/steady_state、float µN。F_ss=c*v_ref−d_used 是未截断的必要稳态力；按执行器采用的 run/seq 与 F/I/ref 关联。没有可用目标时 F_ss 留空，effort_mode 为当前 GUI 选择；实际 target 已存在时优先记录该目标使用的模式 |
 | 路径 | `target_idx`, `s_progress`, `s_total`, `finished`, `path_deviation`, `ref_x`, `ref_y`, `vref_x`, `vref_y` | target_idx 为统一弧长派生的显示索引；s_progress/s_total 为 float mm，finished/path_deviation 为 bool。progress 字段是当前最新已提交 worker 进度，参考字段仍按执行器采用的 seq 关联；worker 在本 tick 中发布时，两者可能属于相邻 seq |
 | 目标关联 | `run`, `seq`, `alpha`, `frames_since`, `F_target_x`, `F_target_y`, `F_target_z`, `I_target_0`…`I_target_5` | int 追踪运行编号/执行器使用的 seq、float 插值 alpha、int 帧计数、float µN / A；目标/参考按 `(run,seq)` 从有界快照关联，避免混入 worker 后发的目标 |
@@ -52,7 +52,11 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 新默认为 L3：FirstOrderESO + steady_state effort；omega=4 沿用软件默认，尚未实机标定。高级控制选择 observer，路径页选择 effort；ESO checkbox 可以关闭。L0=legacy+absolute，L1=off+absolute，L2=off+steady_state，L3=first_order+steady_state；first_order+absolute 也可用于诊断。两项选择可保存/载入，旧设置缺少新键时使用新默认。
 
-新 ESO 用 x_dot=(u+d)/c，z1 为 mm、z2 为 µN。缺失视觉帧标记 gap；下一次有效输入只重置位置并清零扰动。dt>0.15 s（复用当前 input freshness 门槛）同样重置；未改变 freshness 的判定或停止流程。在允许的 omega/dt 范围内按 T*omega≤0.5 子步处理，位置量测在线性插值后校正；不补算未知缺口力。legacy ESO 不经过这些新分支。
+新 ESO 用 x_dot=(u+d)/c，z1 为 mm、z2 为 µN。2026-10-06 修正旧“gap重锚且清零”语义：缺失视觉帧 mark_gap；下一次有效输入只重锚 z1/上次量测、保留 z2。当 dt>0.15 s（复用当前 input freshness 门槛）也仅重锚并保留扰动；不补算未知缺口力。reset、新 observer、FirstOrderESO OFF→ON、新 tracking 和模式切换属于 lifecycle restart，清零 z2。checkbox 两次切换都在 tick 之间也触发新建。legacy ESO1D及其原 checkbox 行为保持，freshness/停止流程不变；有效更新的 T*omega≤0.5 子步与校正算法不变。
+
+现有106/56列保持，无新增事件字段。常规缺帧由 detected=False、eso_updated=False、u_eso空以及保留d_hat识别；恢复帧 eso_updated=True 且 d_hat连续，dt_ms>150 的纯时间缺口同样保留。被采样的eso_mode off→first_order/结构变化以及新tracking表示生命周期重启，随后首次有效帧d_hat=0；tracking/run辅助判断新追踪，但run也会在日志attach时增加，不能单独证明reset。GUI回归已核验缺帧/恢复/dt gap/OFF→ON字段。日志是tick采样，不能还原两行之间未被采样的快速OFF→ON或任意外部reset调用；这类机制由专项测试保证，不能仅凭d_hat=0认定reset。
+
+超过300ms的真实GUI停顿可能跨越MCU watchdog；dt_ms沿用clamp到5…200ms的控制dt，不能据其确认MCU是否timeout。observer没有执行层timeout确认，对直接传入>0.30s的dt仍保留z2并重锚；若实际shutdown/恢复，执行模型及旧扰动可能暂时过时。详见ESO_MPC_VALIDATION；结论来自软件验证，尚未实机验证，未改firmware/heartbeat/R-L/CURT反馈。
 
 steady_state 将 wu*F² 改成 wu*(F−F_ss)²，H 不变、g 减去 wu*F_ss，箱约束与变化率项不变。日志中的 F_ss 未 clip；实际 F_target 仍受原 Fmax 箱约束和总水平幅值约束、solver/执行器约束影响。
 
