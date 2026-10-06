@@ -102,4 +102,11 @@ artifacts 保持 untracked；脚本没有 git add/commit/push，也不修改 .gi
 `artifacts/firmware-clean-build-20261006/`。本次仅固化流程，未重新构建：canonical HEX仍为
 46,798 bytes，mtime `2026-10-06 14:50:45.781467+08:00`，SHA-256
 `88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`。
+
+仅上述 SHA 的当前 HEX 属于 **grandfathered / pre-SOP authoritative build**：它在本 SOP
+正式建立前，于 2026-10-06 手工按等价门槛完成 canonical clean Rebuild、静态核验、
+canonical/verified/frozen SHA equality 和 artifact freeze 后获认可。
+后续任何新的正式 firmware build 必须走本 SOP 的全部流程并取得 PASS manifest；
+此特例只适用于上述已验证 HEX，不允许未来绕过 SOP。
+
 首次实际执行新正式入口时仍必须完成全部门槛，不能把本次DryRun/旧核验报告伪装成新build。

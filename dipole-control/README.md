@@ -213,8 +213,11 @@ python magnetic_dipole_pid.py    # 启动 GUI
   z1 为 mm、z2 为扰动力 µN；l1=2ω、l2=cω²，omega=4 沿用软件默认、未实机标定。
   GUI 先用上一执行帧的 R-L/MDM `F_est` 更新 observer，再发布给 MPC；统一 `z3`
   数组是兼容扰动力字段，新 observer 的内部 z2 通过它发布。
-  视觉 gap 或 dt>0.15s 后重置位置、清零扰动；其余 dt 用 Tω≤0.5 子步稳定校正。
-  原 `ESO1D` 类原文保留为 legacy，它的二阶假设不符合一阶对象，仅用于 A/B。
+  PC observer 遇到 measurement gap（视觉缺帧）或 dt > 0.15 s 时，下一次有效量测
+  只重锚 z1/上次量测，保留 z2 / d_hat；当帧不预测/校正未知缺口。
+  observer lifecycle reset（FirstOrderESO OFF → ON、新 tracking、observer mode switch、
+  新实例或显式 reset）才清零 z2 / d_hat；其余有效更新用 Tω≤0.5 子步稳定校正。
+  原 `ESO1D` 类及行为不变，保留为 legacy；它的二阶假设不符合一阶对象，仅用于 A/B。
 - **A/B 模式**：L0=legacy+absolute，L1=ESO off+absolute，L2=ESO off+steady_state，
   L3=first_order+steady_state（新默认）。高级控制页选择 observer / ESO 开关，路径页
   选择 effort；选择可持久化，旧设置没有新模式键时使用 L3。统一日志记录实际模式、
@@ -308,7 +311,15 @@ C:\Python314\python.exe -B -m pytest -q -p no:cacheprovider tests/test_gui_curt_
 本项目当前解释器是 `C:\Python314\python.exe`，已补齐 PySide6 6.11.2 和
 pyserial 3.5。numpy、OpenCV、pip 版本保持原样。
 
-先烧录本轮 telemetry HEX（根目录 `artifacts/curt-telemetry-20261003/pwm_02.hex`），
+需要烧录时，以当前 authoritative HEX 及 SHA-256 为准（路径相对项目根目录）：
+
+- canonical HEX：`pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.hex`，46,798 bytes。
+- SHA-256：`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`。
+
+烧录前核对所选 HEX 的 SHA；正式 firmware build / release 规则见
+[FIRMWARE_BUILD_SOP.md](../FIRMWARE_BUILD_SOP.md)。历史 artifacts 中的旧 HEX
+不能仅因文件名同为 `pwm_02.hex` 就直接用于烧录。
+
 关闭 GUI/串口助手对同一 COM 口的连接。在 `dipole-control` 目录运行：
 
 ```powershell
