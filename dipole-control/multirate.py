@@ -77,6 +77,8 @@ class SharedState:
             "mpc_w_vel": cfg.MPC_W_VEL,
             "mpc_w_u": cfg.MPC_W_U,
             "mpc_w_du": cfg.MPC_W_DU,
+            "mpc_effort_mode": cfg.MPC_EFFORT_MODE,
+            "eso_mode": cfg.ESO_MODE,
             "fz_lift": 0.0,
             "eso_d": np.zeros(2),
             "t": 0.0,
@@ -365,9 +367,13 @@ class ControlWorker(threading.Thread):
         from mpc import ForceMPC
 
         signature = self._controller_signature(params, c_drag)
-        horizon, wp, wv, wu, wd, fmax, _ = signature
-        self.mpc_x = ForceMPC(self.period, horizon, c_drag, wp, wv, wu, fmax, wd)
-        self.mpc_y = ForceMPC(self.period, horizon, c_drag, wp, wv, wu, fmax, wd)
+        horizon, wp, wv, wu, wd, fmax, _, effort_mode = signature
+        self.mpc_x = ForceMPC(
+            self.period, horizon, c_drag, wp, wv, wu, fmax, wd, effort_mode
+        )
+        self.mpc_y = ForceMPC(
+            self.period, horizon, c_drag, wp, wv, wu, fmax, wd, effort_mode
+        )
         self._c_drag = c_drag
         self._mpc_signature = signature
 
@@ -382,6 +388,7 @@ class ControlWorker(threading.Thread):
             max(float(params.get("mpc_w_du", cfg.MPC_W_DU)), 0.0),
             max(float(params.get("fmax", cfg.MPC_FMAX_UN)), 1.0),
             float(c_drag),
+            params.get("mpc_effort_mode", cfg.MPC_EFFORT_MODE),
         )
 
     @property
@@ -535,6 +542,9 @@ class ControlWorker(threading.Thread):
             rec["requested_B_direction_model"] = bd_model.copy()
             rec["requested_B_direction"] = model_to_cam_vec(bd_model, R)
         rec["requested_force_camera"] = F_target * 1e-6
+        # Observation-only association with the target actually consumed at 30Hz.
+        rec["mpc_effort_mode"] = self.mpc_x.effort_mode
+        rec["F_ss_camera_uN"] = c_drag * np.asarray(vref[0]) - eso_d
 
         # 力回代验证（对 I_target 而非内部候选）
         F_re = np.asarray(rec["achieved_force"], float) * 1e6
@@ -653,6 +663,10 @@ class ControlWorker(threading.Thread):
                 "w_du": float(mpc.wd),
                 "fmax": float(mpc.fmax),
                 "max_cmd": int(params.get("max_cmd", cfg.CMD_MAX)),
+                "eso_mode": str(params.get("eso_mode", "off")),
+                "effort_mode": str(mpc.effort_mode),
+                "F_ss_x": float(mpc.c * vref[0][0] - eso_d[0]),
+                "F_ss_y": float(mpc.c * vref[0][1] - eso_d[1]),
                 "force_error_uN": float(ferr),
             }
             for prefix, vector in (

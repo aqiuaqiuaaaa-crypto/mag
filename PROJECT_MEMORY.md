@@ -2,6 +2,26 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
+## 最新权威摘要（2026-10-06：FirstOrderESO + MPC steady-state effort，第二层首个独立任务）
+
+- 首先核对 Git：父 HEAD 为 `8549352e492e4d9cde2cc4142001fcada7ff994a`（`fix: unify path progress tracking`），tracked worktree clean，仅 artifacts/ untracked。前七项第一层修复在源码和最新记忆中一致。本轮只修 observer/effort 的闭环阶次一致性；不操作真实 COM/相机/实板，不构建/烧录/修改固件。
+- **实际配置有两套**：config 默认 MPC 权重 1/2/.005/.01、Fmax=40；现存 `gui_settings.json` 启动覆盖为 40/.8/.02/.001、Fmax=50、gain=.02、Br=.35、场方向+Z、lift off。保存文件原字节保留，不把 config 默认实验冒充现存 GUI 启动配置。两套配置都做了仿真与父回放。
+- 当前正式 MPC 为 `c*x_dot=F+d`；legacy ESO1D 实际使用二阶速度状态导数 `z2_dot=b0*(u+z3)-...`。当前真实模块、c=9.42477796076938、omega=4、dt=1/30 的200s复现：u/d=(8,3)、(-8,3)、(8,-3)、(-8,-3)、(0,6) 时 z3分别约 -8、8、-8、8、0，即趋向-u而非d。新回归明确保留错误对照，原 ESO1D/fal 计算原样保留。
+- 新 `estimators.FirstOrderESO`：模型 `x_dot=b0*(u+d)`；z1位置mm、z2扰动力µN，b0=1/c为mm/(µN*s)，l1=2omega为1/s，l2=c*omega²为µN/(mm*s)。预测 `z1+T*b0*(u_prev+z2)`，以端点量测创新校正 z1/z2并保留原d_max限幅。mm↔m、µN↔N的独立单位换算回归通过。omega=4沿用软件默认，未实机标定。
+- `u_eso`来源与父时序保持：GUI在本周期executor之前取上一次 `last_F_actual[:2]*1e6`；它来自上一次executor的R-L I_est经MDM正向得到F_est，再转camera-world。是上一执行帧endpoint模型力估计，不是未来F_target、CURT测量或缺口期间力的重建。worker的ΔF仍由last_sent整数命令静态forward求F_prev，两者不混用。
+- 新observer离散误差矩阵trace=2−2h−h²、det=1−2h，h=T*omega；Schur条件0<h<sqrt(8)−2。采用ceil(dt*omega/.5)子步，把h约束≤.5，位置量测在前后有效位置之间线性插值、u保持。40×40网格覆盖omega=.5…20、GUI dt=.005… .2；1200有效更新组合验证谱半径<1和d收敛，400大dt组合验证只重置。视觉缺口/ESO off标记gap，恢复或dt>.15s（复用原input freshness门槛）时重置位置并清零扰动；不把巨大恢复误差灌进d，不改变freshness/stop策略。legacy不经过新分支。
+- MPC增加 `steady_state` effort：F_ss=c*vref−d；原QP为F'HF+2g'F，**只将g减去wu*F_ss**，H、solver、Fmax箱约束、总水平幅值约束、w_delta与wu数值不变。cost按新中心计算，F_ss不提前clip，超界仍由原QP正确饱和。H/g捕获、直接四项cost、有限差分、正确d固定点与超界有限性回归通过。独立ForceMPC构造器为兼容仍默认absolute，应用显式传配置模式。
+- **重新核实κ，不能只引用旧0.822**：直线几何lookahead、ESO off、理想执行、未饱和、F_prev=F0时，F0=A*vref+B*F_prev，κ=A/[c*(1−B)]。config默认 A=6.056941702460568、B=.21858184533848998，κ=.8224296694545196（F=7.751217022957801µN）；实际保存权重 A=6.1044707593141325、B=.02353433076106354，κ=.6633151421575442（F=6.25159793285103µN）。两套steady_state固定点κ=1，误差<1e−13；此理想比例不等于完整非线性执行链/实机速度。
+- A/B主要模式全部保留：L0=legacy+absolute，L1=ESO off+absolute，L2=ESO off+steady_state，**L3=first_order+steady_state为新默认**；first_order+absolute也支持。GUI高级页observer选择+ESO checkbox、路径页effort选择，两项可持久化；旧保存设置缺少新键时也用L3，不修改其中既有物理/权重。切换observer仅重置ESO，KF保持；切换effort下一10Hz周期重建MPC。
+- 最小日志：control从101到**104列**（effort_mode/F_ss_x/y），worker从51到**55列**（eso_mode/effort_mode/F_ss_x/y），原d_hat/u_eso/F_target/F_est/vref/solver字段复用。eso_mode明确first_order/legacy/off；F_ss与effort按执行器实际采用run+seq关联，切换期间不冒充GUI最新选择；跳过worker事件未计算列仍为空。原队列/磁盘机制和24列CSV保持，CONTROL_LOG.md更新语义。
+- 正式仿真 **33/33**：两套配置×nominal/Coulomb(mu=.10现有仿真默认)/c_true=1.5c/friction+增阻×L0-L3共32矩阵+1视觉gap。每组8s/240个30Hz帧/80次10Hz发布，实际GUI start/状态估计/MPC执行调用、SharedState/path reference/freshness、180偶极子solver、CurrentExecutor全部走生产代码；plant用原BeadSimulator并独立150Hz积分原R-L lag。视觉噪声sigma=sqrt(.005)mm，Kalman Q/R不变；合成true drag不写入生产配置。
+- **L3速度结果**（后4s沿直线均速，mm/s）：已保存GUI nominal/friction/drag/combined分别 **.998480/1.001563/.998158/1.010385**；config默认分别 **.937304/1.019453/1.009286/.996682**。无明显发散，全部最大Δcmd≤9/帧，Fmax力饱和率0。config默认命令达到±50比例约71%–93%，保存配置这组未达到上限；命令上限与MPC力饱和分开记录，不为仿真调场目标/电流/物理值。tracking RMS、d_hat/d_true、F_target/F_est、speed std、横向RMS、command reversal、solver/freshness及逐tick trace见验证报告/artifacts；不声称实机必然更好或L3所有指标必然最优。
+- **父逐位证据**：45组absolute golden来自父Git源码，覆盖允许N=1…6、保存权重、signed zero/参考补齐/无速度参考/饱和，H/g及全部输出float64字节一致。真实父GUI/ESO/MPC/worker分别用两套配置回放，各8场景×normal/emergency stop，共 **3840 active tick +960 stop tick、4856条43-byte帧逐位一致**；参考/progress/seq/target、KF/legacyESO、R-L/executor、所有父非计时solver记录一致，仅排除耗时/callback身份/新增纯mode-F_ss诊断。
+- 新专项 **77/77**（unit/GUI42、simulation33、replay2）；FirstOrderESO可执行行跟踪 **44/44（100%）**、AST提取后的新增class strict mypy通过（不声称旧工程全strict）。Ruff清零、Black/mypy38文件；GUI smoke、shared6、MPC6、multirate18、solver/protocol/safety25、bead sim8、CURT132、control log25、stop21、serial46、frames57、freshness25（10000tick）、path34、error46（10条旧warning）、watchdog integration7/C host29全部通过。
+- 不隐藏失败：首轮multirate test_solver_no_block最大帧间隔60.5ms越过原60ms阈值（17/18）；独立复测及最终整组均18/18，未改阈值/调度。首轮新legacy对照运行40s尚未达到高精度阈值，延长到200s后通过而不降低阈值。原始失败日志、初轮回归和最终记录保留。
+- 保护：**151固件文件逐字节不变**；DipoleSolver、frame/path progress/friction/CURT/ADC/仿真物理与保存设置等9个文件原字节不变；ESO1D/Kalman/整个CurrentExecutor原文保持；QP solver、SharedState guards、所有既有config赋值数学值不变，GUI其余111个既有函数AST不变。未改R/L/c、摩擦、CURT raw→A、Kalman Q/R、offset/z/Fz/current PI、serial/watchdog/target±9/执行插值/slew/10-30Hz架构。
+- 完整数学/单位/两套L0-L3表/限制/测试见 `dipole-control/ESO_MPC_VALIDATION.md`；机器证据见 `artifacts/eso-mpc-20261006/` 的baseline-reproduction、saved-profile-kappa、simulation/replay/protection/coverage-results、initial-regressions、isolated-rechecks、regressions、quality-final、final-results及diff/status/checkpoint记录。artifacts不提交。全部验证通过后按用户授权建立本摘要所在独立checkpoint `fix: align eso and mpc steady-state dynamics`，不push。
+
 ## 最新权威摘要（2026-10-06：统一路径弧长 progress / 局部连续投影，独立任务）
 
 - 基于 `93c2e46902c664c68e449f0b0520501af2ac06d6`（`fix: enforce control data freshness`），只实现路径进度连续性与唯一权威来源。未改 MPC/ESO/solver 数学、target box、CurrentExecutor 整类（含 interpolation/slew/R-L）、freshness 阈值/旧发布检查、serial/watchdog、frame transform、物理/摩擦/CURT/ADC 或固件；路径生成器/resample/lead 原文保持。

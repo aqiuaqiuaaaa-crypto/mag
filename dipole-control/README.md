@@ -185,6 +185,11 @@ python magnetic_dipole_pid.py    # 启动 GUI
 - **默认 MPC 权重**：`W_POS=1, W_VEL=2, W_U=0.005, W_DU=0.01`。后两项按 µN
   量纲设定，避免旧值 `0.05/0.10` 让 10µN 控制力的代价远高于 1mm 位置误差；
   `FMAX=40µN` 保持为安全上限，并不会主动放大未饱和的输出。
+  这是 config 默认；现有 `gui_settings.json` 会覆盖成 `40/0.8/0.02/0.001`、
+  `FMAX=50µN`。本次保留保存设置和所有权重、物理值。
+- **用力中心**：应用默认 `steady_state`，用 `wu*(F−(c*v_ref−d))²`，H 不变、
+  g 减去 `wu*(c*v_ref−d)`。路径页可选回 `absolute`（原 `wu*F²`）；独立
+  `ForceMPC` 构造器保留 absolute 默认，应用通过配置明确选择新模式。
 - **MPC 实时参数**：路径页可在线修改预测步数 `N`（1~6）、`Wpos/Wvel/Wu/Wdu`
   和独立水平力上限；GUI 每30Hz发布参数，工作线程在下一10Hz周期自动重建 MPC。
   画面黄色圆为 GUI 路点，品红圆为 MPC 首参考点，橙色箭头为 `F_target`，红色箭头
@@ -204,10 +209,16 @@ python magnetic_dipole_pid.py    # 启动 GUI
 - **Fz 减摩**：N = max(N_min, W_eff − Fz_lift)，W_eff=(ρ珠−ρ液)·V·g≈33.4µN；
   Fz_lift = clip(W_eff·(1−ratio), 0, Fz_max)，默认 ratio=0.4（N 降至 40%，
   **适度减压、不做完全悬浮**）。
-- **ESO**：绕一阶过阻尼动力学 c·v = F + d（ẍ = b0·(u+d), b0 = 1/c ≠ 1/m）建立
-  三阶离散 ESO（β1=3ω0, β2=3ω0², β3=ω0³；fal 函数；真实 dt），z3 为扰动力估计
-  （限幅可调）。GUI 以执行器估计磁力更新 ESO，z3 通过 `eso_d` 进入 MPC 输入；
-  30Hz 下 ω0 建议 ≤6 rad/s（默认 4）。
+- **ESO**：默认 `FirstOrderESO`，与 c·v=F+d / x_dot=(u+d)/c 的单积分器一致。
+  z1 为 mm、z2 为扰动力 µN；l1=2ω、l2=cω²，omega=4 沿用软件默认、未实机标定。
+  GUI 先用上一执行帧的 R-L/MDM `F_est` 更新 observer，再发布给 MPC；统一 `z3`
+  数组是兼容扰动力字段，新 observer 的内部 z2 通过它发布。
+  视觉 gap 或 dt>0.15s 后重置位置、清零扰动；其余 dt 用 Tω≤0.5 子步稳定校正。
+  原 `ESO1D` 类原文保留为 legacy，它的二阶假设不符合一阶对象，仅用于 A/B。
+- **A/B 模式**：L0=legacy+absolute，L1=ESO off+absolute，L2=ESO off+steady_state，
+  L3=first_order+steady_state（新默认）。高级控制页选择 observer / ESO 开关，路径页
+  选择 effort；选择可持久化，旧设置没有新模式键时使用 L3。统一日志记录实际模式、
+  d_hat/u_eso/F_ss，字段与时序见 [CONTROL_LOG.md](CONTROL_LOG.md)。
 - **状态估计**：KALMAN（默认，[x,y,vx,vy] 常速度 KF，Q/R 可调）/ EMA / RAW；
   视觉丢失 >1s 自动正常停止。
 - **方向测试模式**：恒定三维 F_test，实时显示 F_des/F_act/幅值误差/目标方向/

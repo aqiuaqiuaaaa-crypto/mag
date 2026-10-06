@@ -92,7 +92,8 @@ PATH_LOST_DIST_MM = 3.0
 PATH_FINISH_TOL_MM = 0.5  # 保留 GUI spin_tol_default 原默认语义
 
 # ---------- ESO ----------
-ESO_OMEGA0 = 4.0  # 观测器带宽 (rad/s)，30Hz 下稳定裕度 fs/ω0≈7.5
+ESO_MODE = "first_order"  # L3 default; "legacy" for L0; GUI checkbox supplies off
+ESO_OMEGA0 = 4.0  # 软件默认带宽 (rad/s)，沿用历史值，尚未实机标定
 ESO_FAL_DELTA = 0.05  # fal 函数线性段宽度 (mm)
 ESO_DIST_LIMIT_UN = 80.0  # 扰动估计限幅 (µN)
 
@@ -118,6 +119,7 @@ TARGET_STALE_STOP_S = 1.00  # age > 此值由 GUI normal_stop 按原斜率归零
 
 # MPC（准静态模型：x' = x + dt·(F+d)/c，c = 斯托克斯阻力系数）
 MPC_HORIZON = 3  # 预测步数（10Hz × 3 = 300ms 视界）
+MPC_EFFORT_MODE = "steady_state"  # L3 default; "absolute" for L0/L1
 MPC_W_POS = 1.0  # 位置误差权重 (1/mm²)
 MPC_W_VEL = 2.0  # 速度误差权重（速度=(F+d)/c，代数关系）
 MPC_W_U = 0.005  # 控制量权重 (1/µN²)：原 0.05 会把 µN 力过度压小

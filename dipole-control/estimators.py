@@ -3,15 +3,12 @@
 ======================
 KalmanFilter2D : 4 状态 [x, y, vx, vy] 常速度模型卡尔曼滤波，
                  输出滤波位置/速度，替代直接差分 + EMA（EMA 保留为 fallback）。
-ESO1D         : 单轴三阶 ESO（扩张状态观测器）。
+FirstOrderESO : 一阶过阻尼对象 x_dot = b0*(u+d)，b0=1/c。
+ESO1D         : 原三状态二阶对象 observer，原样保留用于 legacy A/B。
 
-ESO 动力学假设（重要，与低雷诺数过阻尼系统一致，见需求 九）：
-    磁珠准静态动力学：c·v = F + d   （c = 斯托克斯阻力系数，d = 广义扰动力）
-    →  ẍ = (F + d)/c ≡ b0·u + f，  b0 = 1/c，f = d/c
-    即从磁力 u 到位置 x 等效"双积分器 + 输入增益 b0 = 1/c"，
-    因此采用标准三阶 ESO 结构（β1=3ω0, β2=3ω0², β3=ω0³），
-    但 b0 取 1/c 而非 1/m。z3 以**力为单位**（d 而非 f）估计，补偿时直接减。
-    全部离散实现，使用真实 dt。
+位置 mm，时间 s，力 µN；c 的单位 µN*s/mm，b0 为 mm/(µN*s)。
+过阻尼代数式 c*v=F+d 只产生一个位置积分器，不能推得 x_ddot=(F+d)/c。
+ESO1D 的历史阶次不匹配由专项回归保留；新控制默认使用 FirstOrderESO。
 """
 
 import math
@@ -111,3 +108,83 @@ class ESO1D:
         self.z3 -= dt * self.beta3 * fal(e1, 0.25, self.delta)
         self.z3 = float(np.clip(self.z3, -self.dist_limit, self.dist_limit))
         return self.z3
+
+
+class FirstOrderESO:
+    """Predict/correct observer for x_dot=b0*(u+d), with d in force units.
+
+    z1 is position [mm]; z2 is disturbance [µN], not velocity. Gains are
+    l1=2*omega [1/s], l2=omega**2/b0 [µN/(mm*s)]. Input u is the previous
+    execution interval's model force [µN]. No target force is consumed.
+
+    One correction is Schur stable for 0<T*omega<sqrt(8)-2. Subintervals
+    bound T*omega to 0.5, with linearly interpolated measurements and held u.
+    A missing vision sample or dt beyond max_dt reanchors position and clears
+    disturbance on recovery; unknown gap dynamics cannot become an innovation.
+    omega is a software setting, not a measured hardware bandwidth.
+    """
+
+    def __init__(
+        self,
+        b0: float,
+        omega0: float,
+        dist_limit: float,
+        *,
+        max_dt: float = 0.15,
+    ) -> None:
+        values = (b0, omega0, dist_limit, max_dt)
+        if not all(math.isfinite(value) for value in values):
+            raise ValueError("FirstOrderESO parameters must be finite")
+        if b0 <= 0 or omega0 <= 0 or dist_limit < 0 or max_dt <= 0:
+            raise ValueError("b0, omega0, max_dt must be positive; limit nonnegative")
+        self.b0 = float(b0)
+        self.omega0 = float(omega0)
+        self.l1 = 2.0 * self.omega0
+        self.l2 = self.omega0**2 / self.b0
+        self.dist_limit = float(dist_limit)
+        self.max_dt = float(max_dt)
+        self.z1 = 0.0
+        self.z2 = 0.0
+        self.initialized = False
+        self._last_y = 0.0
+        self._gap = False
+
+    def reset(self, x0: float = 0.0) -> None:
+        """Anchor measured position and clear disturbance at start/recovery."""
+        if not math.isfinite(x0):
+            raise ValueError("position must be finite")
+        self.z1 = self._last_y = float(x0)
+        self.z2 = 0.0
+        self.initialized = True
+        self._gap = False
+
+    def mark_gap(self) -> None:
+        """Require reanchoring on the next valid vision sample."""
+        self._gap = True
+
+    def step(self, dt: float, x_meas: float, u: float) -> float:
+        """Return disturbance [µN] from endpoint position and prior force."""
+        dt, y, u = float(dt), float(x_meas), float(u)
+        if not all(math.isfinite(value) for value in (dt, y, u)) or dt <= 0:
+            raise ValueError("dt must be positive; dt, measurement and u finite")
+        if not self.initialized or self._gap or dt > self.max_dt:
+            self.reset(y)
+            return self.z2
+        steps = max(1, math.ceil(dt * self.omega0 / 0.5))
+        interval = dt / steps
+        start_y = self._last_y
+        for index in range(1, steps + 1):
+            # Exact endpoint for steps=1 retains the stated predict/correct law.
+            sample = y if index == steps else start_y + (y - start_y) * index / steps
+            predicted = self.z1 + interval * self.b0 * (u + self.z2)
+            error = sample - predicted
+            self.z1 = predicted + interval * self.l1 * error
+            self.z2 = float(
+                np.clip(
+                    self.z2 + interval * self.l2 * error,
+                    -self.dist_limit,
+                    self.dist_limit,
+                )
+            )
+        self._last_y = y
+        return self.z2

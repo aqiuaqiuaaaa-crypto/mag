@@ -9,14 +9,16 @@
 代价（每轴独立，x/y 解耦）：
     J = Σ_{k=1..N} wp·(x_k − x_ref_k)²
       + Σ_{k=0..N−1} wv·((F_k + d)/c − v_ref_k)²
-      + Σ_{k=0..N−1} wu·F_k²
+      + Σ_{k=0..N−1} wu·(F_k − F_center_k)²
       + Σ_{k=0..N−1} wΔ·(F_k − F_{k−1})²
 
     - 第一项：位置轨迹跟踪（参考点由路径弧长 + 设定速度生成）；
     - 第二项：速度跟踪（准静态下 v=(F+d)/c，等价于把 F 拉向 c·v_ref−d，
       天然包含速度前馈与扰动补偿，且与 30Hz 层的阻力补偿不重复——MPC 层
       不再单独加 c·(v_des−v)）；
-    - 第三项：控制量幅值；第四项：相对实际已发送电流对应磁力的变化率。
+    - 第三项：absolute 时 F_center=0（legacy）；steady_state 时
+      F_center=c*v_ref-d，避免把维持速度的必要力压向零。
+      第四项：相对实际已发送电流对应磁力的变化率。
 
 求解：动力学对 F 线性 → 二次代价收缩为小规模线性最小二乘（N×N），
 使用活动集精确求解 |F_k| ≤ F_max 的小规模箱约束二次规划。
@@ -41,7 +43,11 @@ class ForceMPC:
         w_u=0.005,
         fmax=40.0,
         w_delta=0.01,
+        effort_mode="absolute",
     ):
+        if effort_mode not in ("absolute", "steady_state"):
+            raise ValueError(f"Unknown MPC effort mode: {effort_mode}")
+        self.effort_mode = effort_mode
         self.dt = float(dt)
         self.N = int(horizon)
         self.c = float(c_drag)
@@ -115,7 +121,8 @@ class ForceMPC:
         x_pred_const = x0 + a * k_vec * d  # F=0 时的预测轨迹（含扰动）
 
         # 代价二次型（变量 F_0..F_{N−1}）：
-        #   J = Σ wp·(x0 + a·L F + a·k·d − r)² + Σ wv/c²·(F + d − c·vr)² + Σ wu·F²
+        #   J = Σ wp·(x0 + L F + a·k·d − r)² + Σ wv/c²·(F + d − c·vr)²
+        #       + Σ wu·(F-F_center)²; L already contains a=dt/c.
         # D·F-b = [F0-F_prev, F1-F0, ...]。
         D = np.eye(N)
         if N > 1:
@@ -134,6 +141,11 @@ class ForceMPC:
             # 速度项梯度：wv/c²·(F_k + d − c·vr_k) → 线性项 −wv/c²·(c·vr_k − d)
             gv[k] += -(self.wv / self.c**2) * (self.c * vr[k] - d)
         gv -= self.wd * (D.T @ b_delta)
+        # J=F'HF+2g'F+constant: centering changes only g, never H or bounds.
+        # Keep the absolute branch's arithmetic/order identical to its parent.
+        F_ss = self.c * vr - d
+        if self.effort_mode == "steady_state":
+            gv -= self.wu * F_ss
         # 直接求箱约束 QP；不能把耦合的无约束序列逐元素 clip。
         F_seq = self._bounded_qp(H, gv, self.fmax)
 
@@ -142,7 +154,10 @@ class ForceMPC:
         cost = float(
             self.wp * np.sum((x_pred - r) ** 2)
             + self.wv * np.sum((v_pred - vr) ** 2)
-            + self.wu * np.sum(F_seq**2)
+            + self.wu
+            * np.sum(
+                (F_seq - F_ss) ** 2 if self.effort_mode == "steady_state" else F_seq**2
+            )
             + self.wd * np.sum((D @ F_seq - b_delta) ** 2)
         )
         return {

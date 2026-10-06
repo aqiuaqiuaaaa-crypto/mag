@@ -57,6 +57,9 @@ CONTROL_FIELDS = (
     "state_vx_mm_s",
     "state_vy_mm_s",
     "eso_mode",
+    "effort_mode",
+    "F_ss_x",
+    "F_ss_y",
     "eso_updated",
     "d_hat_x",
     "d_hat_y",
@@ -114,6 +117,10 @@ WORKER_FIELDS = (
     "x0_y",
     "d_used_x",
     "d_used_y",
+    "eso_mode",
+    "effort_mode",
+    "F_ss_x",
+    "F_ss_y",
     "F_prev_x",
     "F_prev_y",
     "F_prev_z",
@@ -247,6 +254,10 @@ class ControlLogger:
                 F_target_y=float(target["F_target"][1]),
             )
             rec = target.get("rec") or {}
+            if "mpc_effort_mode" in rec:
+                row["effort_mode"] = str(rec["mpc_effort_mode"])
+                for axis, value in zip(("x", "y"), rec["F_ss_camera_uN"]):
+                    row[f"F_ss_{axis}"] = float(value)
             force = rec.get("requested_force_camera")
             if force is not None:
                 row["F_target_z"] = float(force[2]) * 1e6

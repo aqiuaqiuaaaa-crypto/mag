@@ -43,7 +43,7 @@ from adc_csv import ADCLogger
 from control_log import ControlLogger, Scalar
 from curt_telemetry import ADCSnapshot, ADCStreamDecoder
 from dipole_solver import DipoleSolver
-from estimators import ESO1D, KalmanFilter2D
+from estimators import ESO1D, FirstOrderESO, KalmanFilter2D
 from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from multirate import ControlWorker, CurrentExecutor, SharedState
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
@@ -1156,10 +1156,16 @@ class MagneticDipoleControl(QMainWindow):
             setattr(self, name, spin)
             mg.addWidget(spin, row, col + 1)
         self.lbl_mpc_hint = QLabel(
-            "调节规律：Wpos↑更积极；Wu↑力更小；Wdu↑更平滑但响应更慢"
+            "Wpos↑更积极；Wu约束偏离用力中心；Wdu↑更平滑但响应更慢"
         )
         self.lbl_mpc_hint.setWordWrap(True)
         mg.addWidget(self.lbl_mpc_hint, 3, 0, 1, 4)
+        mg.addWidget(QLabel("用力中心"), 4, 0)
+        self.combo_effort = QComboBox()
+        self.combo_effort.addItems(["steady_state", "absolute"])
+        self.combo_effort.setCurrentText(cfg.MPC_EFFORT_MODE)
+        self.combo_effort.setToolTip("steady_state: c·v_ref−d；absolute: 历史零中心")
+        mg.addWidget(self.combo_effort, 4, 1, 1, 3)
         v.addWidget(mpc_box)
 
         h = QHBoxLayout()
@@ -1238,12 +1244,12 @@ class MagneticDipoleControl(QMainWindow):
 
         eso_box = QGroupBox("ESO 扰动观测器（动力学：c·v = F + d，b0 = 1/c）")
         eg = QGridLayout(eso_box)
-        self.chk_eso = QCheckBox("启用 ESO 补偿 (F_cmd −= z3)")
+        self.chk_eso = QCheckBox("启用 ESO 扰动力估计（发布给 MPC）")
         self.chk_eso.setChecked(True)
         eg.addWidget(self.chk_eso, 0, 0, 1, 2)
         eg.addWidget(QLabel("带宽 ω0 (rad/s)"), 1, 0)
         self.spin_omega0 = self._dspin(0.5, 20.0, cfg.ESO_OMEGA0, 0.5, 1)
-        self.spin_omega0.setToolTip("30Hz 下建议 ≤6；过大离散不稳定")
+        self.spin_omega0.setToolTip("沿用软件默认，未实机标定；legacy 30Hz 下建议 ≤6")
         eg.addWidget(self.spin_omega0, 1, 1)
         eg.addWidget(QLabel("fal δ (mm)"), 2, 0)
         self.spin_fal_delta = self._dspin(0.001, 1.0, cfg.ESO_FAL_DELTA, 0.01, 3)
@@ -1251,6 +1257,16 @@ class MagneticDipoleControl(QMainWindow):
         eg.addWidget(QLabel("扰动限幅 (µN)"), 3, 0)
         self.spin_dist_limit = self._dspin(1.0, 500.0, cfg.ESO_DIST_LIMIT_UN, 10.0, 1)
         eg.addWidget(self.spin_dist_limit, 3, 1)
+        eg.addWidget(QLabel("观测器结构"), 4, 0)
+        self.combo_eso = QComboBox()
+        self.combo_eso.addItems(["first_order", "legacy"])
+        self.combo_eso.setCurrentText(cfg.ESO_MODE)
+        self.combo_eso.setToolTip(
+            "L0: legacy+absolute；L1: 关闭+absolute；"
+            "L2: 关闭+steady_state；L3: first_order+steady_state"
+        )
+        eg.addWidget(self.combo_eso, 4, 1)
+        self.combo_eso.currentTextChanged.connect(self._reset_controllers)
         v.addWidget(eso_box)
 
         kal_box = QGroupBox("状态估计（视觉）")
@@ -1557,19 +1573,8 @@ class MagneticDipoleControl(QMainWindow):
 
     def _rebuild_eso(self):
         """参数变化后重建 ESO（b0=1/c 随黏度/珠径变化）"""
-        c = self._drag_c_uN()
-        self.eso_x = ESO1D(
-            1.0 / c,
-            self.spin_omega0.value(),
-            self.spin_fal_delta.value(),
-            self.spin_dist_limit.value(),
-        )
-        self.eso_y = ESO1D(
-            1.0 / c,
-            self.spin_omega0.value(),
-            self.spin_fal_delta.value(),
-            self.spin_dist_limit.value(),
-        )
+        self.eso_x = self._make_eso()
+        self.eso_y = self._make_eso()
         self.kf = KalmanFilter2D(
             self.spin_q_pos.value(), self.spin_q_vel.value(), self.spin_r_meas.value()
         )
@@ -1847,6 +1852,8 @@ class MagneticDipoleControl(QMainWindow):
                 "tracking": self.tracking,
                 "estimator": self.combo_estimator.currentText(),
                 "eso": self.chk_eso.isChecked(),
+                "eso_mode": self._eso_mode(),
+                "effort_mode": self.combo_effort.currentText(),
                 "lift": self.chk_lift.isChecked(),
                 "constraint": self.combo_constraint.currentText(),
             },
@@ -1966,7 +1973,8 @@ class MagneticDipoleControl(QMainWindow):
                 frame_ok=self.frame is not None,
                 detected=detected,
                 estimator_mode=self.combo_estimator.currentText(),
-                eso_mode="ON" if self.chk_eso.isChecked() else "OFF",
+                eso_mode=self._eso_mode(),
+                effort_mode=self.combo_effort.currentText(),
                 d_hat_x=float(self.z3[0]),
                 d_hat_y=float(self.z3[1]),
                 target_idx=self.target_idx,
@@ -2701,20 +2709,29 @@ class MagneticDipoleControl(QMainWindow):
 
     def _reset_controllers(self):
         """模式切换/启动时复位 ESO（KF 保持连续）"""
+        self.eso_x = self._make_eso()
+        self.eso_y = self._make_eso()
+        self.z3 = np.zeros(2)  # compatibility vector: disturbance force for either ESO
+
+    def _eso_mode(self) -> str:
+        return self.combo_eso.currentText() if self.chk_eso.isChecked() else "off"
+
+    def _make_eso(self) -> ESO1D | FirstOrderESO:
+        """Select structure; keep the legacy constructor and its units unchanged."""
         c = self._drag_c_uN()
-        self.eso_x = ESO1D(
+        if self.combo_eso.currentText() == "first_order":
+            return FirstOrderESO(
+                1.0 / c,
+                self.spin_omega0.value(),
+                self.spin_dist_limit.value(),
+                max_dt=cfg.KALMAN_STALE_S,
+            )
+        return ESO1D(
             1.0 / c,
             self.spin_omega0.value(),
             self.spin_fal_delta.value(),
             self.spin_dist_limit.value(),
         )
-        self.eso_y = ESO1D(
-            1.0 / c,
-            self.spin_omega0.value(),
-            self.spin_fal_delta.value(),
-            self.spin_dist_limit.value(),
-        )
-        self.z3 = np.zeros(2)
 
     def save_traj(self) -> None:
         if not self.exp_log_mpc:
@@ -3152,6 +3169,9 @@ class MagneticDipoleControl(QMainWindow):
         if not self._check_path_progress():
             return
         if self.bead is None:
+            for observer in (self.eso_x, self.eso_y):
+                if isinstance(observer, FirstOrderESO):
+                    observer.mark_gap()
             if not self._check_control_freshness():
                 return
             if self.lost_since is None:
@@ -3177,6 +3197,9 @@ class MagneticDipoleControl(QMainWindow):
                 )
         else:
             self.z3[:] = 0.0
+            for observer in (self.eso_x, self.eso_y):
+                if isinstance(observer, FirstOrderESO):
+                    observer.mark_gap()  # re-enable cannot consume an unobserved interval
         self.shared.set_kalman(pos, self.state_vel_mm, now)
         self.shared.set_last_sent(self.last_sent_cmd)
         self._publish_mpc_params(now)
@@ -3286,6 +3309,8 @@ class MagneticDipoleControl(QMainWindow):
                 "mpc_w_vel": self.spin_mpc_w_vel.value(),
                 "mpc_w_u": self.spin_mpc_w_u.value(),
                 "mpc_w_du": self.spin_mpc_w_du.value(),
+                "mpc_effort_mode": self.combo_effort.currentText(),
+                "eso_mode": self._eso_mode(),
                 "max_active": self.n_coils_total,
                 "mpc_on": self.tracking,
                 "fz_lift": fz_lift,
@@ -3571,6 +3596,7 @@ class MagneticDipoleControl(QMainWindow):
             "mpc_w_vel": self.spin_mpc_w_vel,
             "mpc_w_u": self.spin_mpc_w_u,
             "mpc_w_du": self.spin_mpc_w_du,
+            "mpc_effort_mode": self.combo_effort,
             "constraint_mode": self.combo_constraint,
             "man_currents": list(self.cur_spins),
             "fx": self.spin_fx,
@@ -3590,6 +3616,7 @@ class MagneticDipoleControl(QMainWindow):
             "fz_max": self.spin_fz_max,
             "n_min": self.spin_n_min,
             "eso_enable": self.chk_eso,
+            "eso_mode": self.combo_eso,
             "eso_omega0": self.spin_omega0,
             "eso_delta": self.spin_fal_delta,
             "eso_limit": self.spin_dist_limit,

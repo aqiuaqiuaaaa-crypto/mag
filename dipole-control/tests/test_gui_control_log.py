@@ -78,7 +78,7 @@ def rows(path: Path) -> list[dict[str, str]]:
 
 
 def validate_types(records: list[dict[str, str]]) -> None:
-    strings = {"mode", "estimator_mode", "eso_mode", "stale_status"}
+    strings = {"mode", "estimator_mode", "eso_mode", "effort_mode", "stale_status"}
     booleans = {
         "tracking",
         "finished",

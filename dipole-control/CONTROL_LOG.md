@@ -4,8 +4,8 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 选 `run.csv` 时，一个会话产生：
 
-- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，101 列。
-- `run.worker.csv`：每次完成的 MPC/solver 诊断或 STALE_INPUT / PATH_DEVIATION 跳过事件一行，约 10 Hz，51 列；原有手动导出 MPC CSV 的格式和内容保留。
+- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，104 列。
+- `run.worker.csv`：每次完成的 MPC/solver 诊断或 STALE_INPUT / PATH_DEVIATION 跳过事件一行，约 10 Hz，55 列；原有手动导出 MPC CSV 的格式和内容保留。
 - `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。`R_force_model_to_camera` 是 model XY → camera world XY 的正交映射；`offset.position_mm` 保存当前 `frame_offset_mm` 的 XY 与固定 z=0，来源为 `config.FRAME_OFFSET_MM`，含义是模型原点在相机世界坐标中的位置（默认 `[0,0]`，尚未实机标定）。ADC offset 仍为 `0/default`，原有像素中心也保留；freshness 门槛由现有 config 快照记录。
 - `run.summary.json`：正常结束时两个流分别的 attempted / accepted / written / dropped / rejected 和日志错误。
 
@@ -23,14 +23,15 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 | 测量 | `meas_x_mm`, `meas_y_mm` | float mm；直接复制 estimate_state 已转换的 z，失检留空，不再转换坐标 |
 | 估计 | `kf_x`, `kf_y`, `kf_vx`, `kf_vy`, `estimator_mode` | float mm / mm/s，string RAW/EMA/KALMAN；kf 字段仅 KALMAN 模式填入 |
 | 当前估计器输出 | `state_x_mm`, `state_y_mm`, `state_vx_mm_s`, `state_vy_mm_s` | float mm / mm/s；记录 RAW/EMA/KALMAN 实际供控制使用的输出 |
-| ESO | `eso_mode`, `eso_updated`, `d_hat_x`, `d_hat_y`, `u_eso_x`, `u_eso_y` | string ON/OFF、bool 本 tick 是否 step、float µN；u 是已有的实际 ESO 输入，未 step 留空；d_hat 是当前 z3，可能保持 |
+| ESO | `eso_mode`, `eso_updated`, `d_hat_x`, `d_hat_y`, `u_eso_x`, `u_eso_y` | string first_order/legacy/off、bool 本 tick 是否 step、float µN；u 是上一执行帧的 camera-world R-L/MDM 估计力（last_F_actual），不是未来 F_target，也不是 CURT 测量。未 step 留空；d_hat 是统一扰动力向量，新 ESO 来自 z2，legacy 来自 z3。恢复帧 step 可能只重置位置并清零扰动 |
+| MPC 用力中心 | `effort_mode`, `F_ss_x`, `F_ss_y` | string absolute/steady_state、float µN。F_ss=c*v_ref−d_used 是未截断的必要稳态力；按执行器采用的 run/seq 与 F/I/ref 关联。没有可用目标时 F_ss 留空，effort_mode 为当前 GUI 选择；实际 target 已存在时优先记录该目标使用的模式 |
 | 路径 | `target_idx`, `s_progress`, `s_total`, `finished`, `path_deviation`, `ref_x`, `ref_y`, `vref_x`, `vref_y` | target_idx 为统一弧长派生的显示索引；s_progress/s_total 为 float mm，finished/path_deviation 为 bool。progress 字段是当前最新已提交 worker 进度，参考字段仍按执行器采用的 seq 关联；worker 在本 tick 中发布时，两者可能属于相邻 seq |
 | 目标关联 | `run`, `seq`, `alpha`, `frames_since`, `F_target_x`, `F_target_y`, `F_target_z`, `I_target_0`…`I_target_5` | int 追踪运行编号/执行器使用的 seq、float 插值 alpha、int 帧计数、float µN / A；目标/参考按 `(run,seq)` 从有界快照关联，避免混入 worker 后发的目标 |
 | 执行 | `executor_updated`, `cmd_exec_a0`…`cmd_exec_a5`, `cmd_sent_a0`…`cmd_sent_a5`, `max_cmd`, `serial_connected` | bool 本 tick executor 是否执行、int CurrentExecutor 输出、int 最终安全层状态、int GUI 限幅、bool 串口连接；cmd_sent **不是**硬件收到命令的确认 |
 | 模型 | `I_est_0`…`I_est_5`, `F_est_x`, `F_est_y`, `F_est_z`, `B_x`, `B_y`, `B_z`, `B_mag_mT`, `align_ratio`, `low_field` | float A / µN / T / mT / 无量纲，bool 低场；来自已有执行器/R-L 诊断，不重新 forward_model；executor 未更新时保持上次模型值，并由 executor_updated 标明 |
 | ADC | `adc_frame_count`, `adc_age_ms`, `raw0`…`raw5`, `adc_valid`, `adc_running`, `adc_error_flags` | int MCU frame_count、float 距 PC 最近收到快照的 ms、int raw/状态/flags；仅监测，不转换成 A、不进入控制 |
 
-空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode/stale_status 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
+空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode/effort_mode/stale_status 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
 
 `I_target` 是 solver 发布的目标电流；`I_est` 是 R-L 估计；`raw` 是未标定 ADC。三者用途和单位不同。通道顺序保持 a0…a5 / `+X,+Y,+Z,-X,-Y,-Z` / Pole `1,3,5,4,6,2`。
 
@@ -40,11 +41,20 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 |---|---|---|
 | 时间/关联 | `t_mono`, `t_wall`, `run`, `seq`, `dropped`, `kalman_age_ms`, `target_age_ms`, `stale_status` | monotonic / wall-clock，按 run+seq 联表；kalman_age_ms 为本周期实际消费输入的 monotonic age（即使已有更新输入也不冒充新输入），target_age_ms 为观察时最新发布目标的 monotonic age |
 | MPC 输入 | `x0_x`, `x0_y`, `d_used_x`, `d_used_y`, `F_prev_x`, `F_prev_y`, `F_prev_z` | 当前准静态 MPC 的位置 x0（mm）、已有扰动力输入和 F_prev（µN）；不虚构四状态预测模型 |
+| 控制结构 | `eso_mode`, `effort_mode`, `F_ss_x`, `F_ss_y` | 本次 worker 消费参数中的 first_order/legacy/off，实际 MPC 实例的 absolute/steady_state，以及 c*vref−d_used（µN）。跳过事件保持这些未计算列为空。F_prev 仍是发送整数命令的静态 forward 力，和含 R-L lag 的 ESO 输入 u_eso 不同 |
 | 目标/路径 | `F_target_x`, `F_target_y`, `F_target_z`, `ref_x`, `ref_y`, `vref_x`, `vref_y`, `s_progress`, `s_total`, `finished`, `path_deviation`, `I_target_0`…`I_target_5` | 直接复制已有 MPC、参考窗口、solver 输出 |
 | 参数/性能 | `mpc_ms`, `solver_ms`, `mpc_cost`, `horizon`, `w_pos`, `w_vel`, `w_u`, `w_du`, `fmax`, `max_cmd`, `force_error_uN` | 当前实际 MPC 实例权重/限制与已有求解计时/误差 |
 | 可行性 | `converged`, `current_constraint_active`, `field_constraint_active`, `direction_constraint_active`, `sparse_infeasible`, `current_bound_ok`, `slew_ok`, `actuation_condition` | 复制 solver 已有 bool 标记和数值条件数；没有该字段时留空 |
 
 当前 metadata 是**开始时**快照；实验途中 GUI 参数变更不生成新的 metadata。worker 行包含实际使用的 MPC 权重/限制，30 Hz 行包含当前模式/max_cmd。为完整保留不同实验配置，应分别开始新记录会话。
+
+## ESO / effort A/B（2026-10-06）
+
+新默认为 L3：FirstOrderESO + steady_state effort；omega=4 沿用软件默认，尚未实机标定。高级控制选择 observer，路径页选择 effort；ESO checkbox 可以关闭。L0=legacy+absolute，L1=off+absolute，L2=off+steady_state，L3=first_order+steady_state；first_order+absolute 也可用于诊断。两项选择可保存/载入，旧设置缺少新键时使用新默认。
+
+新 ESO 用 x_dot=(u+d)/c，z1 为 mm、z2 为 µN。缺失视觉帧标记 gap；下一次有效输入只重置位置并清零扰动。dt>0.15 s（复用当前 input freshness 门槛）同样重置；未改变 freshness 的判定或停止流程。在允许的 omega/dt 范围内按 T*omega≤0.5 子步处理，位置量测在线性插值后校正；不补算未知缺口力。legacy ESO 不经过这些新分支。
+
+steady_state 将 wu*F² 改成 wu*(F−F_ss)²，H 不变、g 减去 wu*F_ss，箱约束与变化率项不变。日志中的 F_ss 未 clip；实际 F_target 仍受原 Fmax 箱约束和总水平幅值约束、solver/执行器约束影响。
 
 ## Freshness 语义（2026-10-06）
 
