@@ -78,7 +78,14 @@ def rows(path: Path) -> list[dict[str, str]]:
 
 
 def validate_types(records: list[dict[str, str]]) -> None:
-    strings = {"mode", "estimator_mode", "eso_mode", "effort_mode", "stale_status"}
+    strings = {
+        "mode",
+        "estimator_mode",
+        "eso_mode",
+        "effort_mode",
+        "interpolation_mode",
+        "stale_status",
+    }
     booleans = {
         "tracking",
         "finished",
@@ -113,6 +120,8 @@ def validate_types(records: list[dict[str, str]]) -> None:
     }
     for row in records:
         for field, value in row.items():
+            if field == "interpolation_mode" and value:
+                assert value in {"legacy_three_frame", "direct"}
             if not value or field in strings:
                 continue
             if field in booleans:
@@ -226,6 +235,9 @@ def test_output_bits_identical_with_logging_and_adc(
     cameras = []
     try:
         for widget, port in zip((plain, window), ports_pair):
+            # Pair the monotonic freshness domain too. Sequential real solves
+            # must not turn a deterministic replay into an age-dependent test.
+            widget.control_clock = lambda: clock[0]
             widget.ser = port
             cameras.append(configure_camera(widget))
             widget.last_time = clock[0]

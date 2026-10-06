@@ -72,6 +72,11 @@ def run_simulation(
     vision_gap: bool = False,
     profile: str = "defaults",
     target_box_delta: int = 9,
+    interpolation_mode: str = "legacy_three_frame",
+    seed: int = 20261006,
+    path_mm: list[tuple[float, float]] | None = None,
+    allow_finish: bool = False,
+    plant_substeps: int = 5,
 ) -> dict[str, Any]:
     """Return metrics and per-tick trace; caller disables real worker scheduling."""
     factor, friction = SCENARIOS[scenario]
@@ -102,6 +107,7 @@ def run_simulation(
     port = SimulationSerial()
     configure_mode(widget, mode)
     widget.combo_target_box.setCurrentText(str(target_box_delta))
+    widget.combo_interpolation.setCurrentText(interpolation_mode)
     widget.control_clock = clock
     widget.shared = SharedState(clock=clock)
     widget.executor = CurrentExecutor(clock=clock)
@@ -117,19 +123,20 @@ def run_simulation(
     start_px = widget.world_mm_to_px((-4, 0))
     widget.bead = (*start_px, 100)
     # Actual start_tracking supplies lead, reference, params, shared and worker.
-    widget.path_px = [
-        start_px,
-        widget.world_mm_to_px((9, 0)),
-        widget.world_mm_to_px((9, 4)),
-    ]
+    widget.path_px = (
+        [widget.world_mm_to_px(p) for p in path_mm]
+        if path_mm is not None
+        else [start_px, widget.world_mm_to_px((9, 0)), widget.world_mm_to_px((9, 4))]
+    )
     widget.start_tracking()
     assert widget.worker is not None
     worker = widget.worker
     # No floating wall-clock is used by the harness; production stop/freshness is.
-    rng = np.random.default_rng(20261006)
+    rng = np.random.default_rng(seed)
     physical_current = np.zeros(6)
     dt = 1 / cfg.CONTROL_HZ
     trace = []
+    completion_time: float | None = None
     for tick in range(ticks):
         clock.now = 1000 + tick * dt
         position = plant.pos * 1e3
@@ -147,7 +154,10 @@ def run_simulation(
             worker._step()
         previous_force = widget.last_F_actual.copy() * 1e6
         widget.mpc_track_step(dt)
-        assert widget.tracking and not widget.stopping
+        if not (widget.tracking and not widget.stopping):
+            assert allow_finish and widget.shared.get_progress().finished
+            completion_time = tick * dt
+            break  # This tick requested normal_stop and sent no tracking frame.
         snapshot = widget.shared.get_I_target()[3]
         target = snapshot["F_target"].copy()
         diagnostic_force = widget.last_F_actual.copy() * 1e6
@@ -155,9 +165,9 @@ def run_simulation(
         cmd = np.asarray(widget.last_sent_cmd)
         assert np.max(abs(cmd)) <= cfg.DEFAULT_CMD_LIMIT
         # Independent R-L integration and nonlinear field-force at actual plant position.
-        sub_dt = dt / 5
+        sub_dt = dt / plant_substeps
         a = math.exp(-cfg.R_COIL_OHM * sub_dt / cfg.L_COIL_H)
-        for _ in range(5):
+        for _ in range(plant_substeps):
             physical_current = (
                 a * physical_current + (1 - a) * cmd * widget.solver.current_gain
             )
@@ -179,6 +189,11 @@ def run_simulation(
                 "F_est_uN": diagnostic_force[:2].tolist(),
                 "u_eso_uN": previous_force[:2].tolist(),
                 "cmd": cmd.tolist(),
+                "I_est_A": widget.executor.I_est.tolist(),
+                "I_physical_A": physical_current.tolist(),
+                "F_physical_uN": (np.atleast_1d(fm["F"]) * 1e6).tolist(),
+                "current_gain": widget.solver.current_gain,
+                "tracking": widget.tracking,
                 "target_cmd": (
                     snapshot["currents"] / widget.solver.current_gain
                 ).tolist(),
@@ -198,13 +213,27 @@ def run_simulation(
                 ),
             }
         )
-    tail = trace[ticks // 2 :]
+        if completion_time is not None:
+            break
+    count = len(trace)
+    tail = trace[count // 2 :]
     positions = np.array([r["pos_mm"] for r in trace])
     speeds = np.array([r["velocity_mm_s"] for r in tail])
     commands = np.array([r["cmd"] for r in trace])
     errors = positions - np.column_stack(
-        [-4 + dt * np.arange(1, ticks + 1), np.zeros(ticks)]
+        [-4 + dt * np.arange(1, count + 1), np.zeros(count)]
     )
+    if path_mm is not None:
+        nodes = np.asarray(path_mm, float)
+        lengths = np.linalg.norm(np.diff(nodes, axis=0), axis=1)
+        arcs = np.r_[0, np.cumsum(lengths)]
+        reference = np.column_stack(
+            [
+                np.interp(dt * np.arange(1, count + 1), arcs, nodes[:, axis])
+                for axis in (0, 1)
+            ]
+        )
+        errors = positions - reference
     changes = np.diff(commands, axis=0)
     reversals = (changes[1:] * changes[:-1]) < 0
     published = [
@@ -212,8 +241,23 @@ def run_simulation(
     ]
     target_changes = np.diff(np.array([r["target_cmd"] for r in published]), axis=0)
     solver_times = np.array([r["solver_ms"] for r in published])
+    path_speed = float(speeds[:, 0].mean())
+    if path_mm is not None:
+        directions = np.diff(nodes, axis=0) / lengths[:, None]
+        segments = np.clip(
+            np.searchsorted(arcs, [r["s_progress"] for r in tail], side="right") - 1,
+            0,
+            len(directions) - 1,
+        )
+        path_speed = float(np.mean(np.sum(speeds * directions[segments], axis=1)))
     result = {
         "target_box_delta": target_box_delta,
+        "interpolation_mode": interpolation_mode,
+        "seed": seed,
+        "plant_substeps": plant_substeps,
+        "completion_time_s": completion_time,
+        "executed_ticks": count,
+        "path_mm": path_mm,
         "max_target_delta_cmd": float(np.max(abs(target_changes))),
         "solver_mean_ms": float(solver_times.mean()),
         "solver_p95_ms": float(np.percentile(solver_times, 95)),
@@ -229,7 +273,7 @@ def run_simulation(
         "ticks": ticks,
         "noise": noise,
         "vision_gap": vision_gap,
-        "mean_path_speed_mm_s": float(speeds[:, 0].mean()),
+        "mean_path_speed_mm_s": path_speed,
         "tracking_rms_mm": float(np.sqrt(np.mean(np.sum(errors**2, axis=1)))),
         "cross_track_rms_mm": float(np.sqrt(np.mean(positions[:, 1] ** 2))),
         "d_hat_x_uN": float(np.mean([r["d_hat_uN"][0] for r in tail])),

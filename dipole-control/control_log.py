@@ -78,6 +78,7 @@ CONTROL_FIELDS = (
     "run",
     "seq",
     "alpha",
+    "interpolation_mode",
     "frames_since",
     "F_target_x",
     "F_target_y",

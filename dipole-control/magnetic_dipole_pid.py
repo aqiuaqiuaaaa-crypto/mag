@@ -376,7 +376,10 @@ class MagneticDipoleControl(QMainWindow):
         # 多速率架构：10Hz MPC/MDM 工作线程 + 30Hz 电流执行层
         self.control_clock = time.monotonic
         self.shared = SharedState(clock=self.control_clock)
-        self.executor = CurrentExecutor(clock=self.control_clock)
+        self.executor = CurrentExecutor(
+            clock=self.control_clock,
+            interpolation_mode=cfg.EXECUTOR_INTERPOLATION_MODE,
+        )
         self.stale_status = "FRESH"
         self.worker = None
         self.last_tick_time = None
@@ -1174,6 +1177,14 @@ class MagneticDipoleControl(QMainWindow):
             "相对上一实际发送命令的目标半宽；27 为周期级范围，9 为 legacy。每帧发送仍 ≤9。"
         )
         mg.addWidget(self.combo_target_box, 5, 1, 1, 3)
+        mg.addWidget(QLabel("执行插值（下次追踪生效）"), 6, 0)
+        self.combo_interpolation = QComboBox()
+        self.combo_interpolation.addItems(["legacy_three_frame", "direct"])
+        self.combo_interpolation.setCurrentText(cfg.EXECUTOR_INTERPOLATION_MODE)
+        self.combo_interpolation.setToolTip(
+            "legacy_three_frame: 三帧渐变；direct: 直接给安全层目标。两者每帧发送仍 ≤9。"
+        )
+        mg.addWidget(self.combo_interpolation, 6, 1, 1, 3)
         v.addWidget(mpc_box)
 
         h = QHBoxLayout()
@@ -1863,6 +1874,8 @@ class MagneticDipoleControl(QMainWindow):
                 "eso": self.chk_eso.isChecked(),
                 "eso_mode": self._eso_mode(),
                 "effort_mode": self.combo_effort.currentText(),
+                "interpolation_mode": self.executor.interpolation_mode,
+                "interpolation_requested": self.combo_interpolation.currentText(),
                 "lift": self.chk_lift.isChecked(),
                 "constraint": self.combo_constraint.currentText(),
             },
@@ -1984,6 +1997,7 @@ class MagneticDipoleControl(QMainWindow):
                 estimator_mode=self.combo_estimator.currentText(),
                 eso_mode=self._eso_mode(),
                 effort_mode=self.combo_effort.currentText(),
+                interpolation_mode=self.executor.interpolation_mode,
                 d_hat_x=float(self.z3[0]),
                 d_hat_y=float(self.z3[1]),
                 target_idx=self.target_idx,
@@ -2710,7 +2724,10 @@ class MagneticDipoleControl(QMainWindow):
         self.shared.set_last_sent(self.last_sent_cmd)
         self._publish_mpc_params(time.time())
         self.shared.set_solver_error(None)
-        self.executor = CurrentExecutor(clock=self.control_clock)
+        self.executor = CurrentExecutor(
+            clock=self.control_clock,
+            interpolation_mode=self.combo_interpolation.currentText(),
+        )
         self.worker = ControlWorker(self.shared, self.solver)
         if self.control_logger is not None and self.control_logger.recording:
             self._attach_control_log()
@@ -3608,6 +3625,7 @@ class MagneticDipoleControl(QMainWindow):
             "mpc_w_du": self.spin_mpc_w_du,
             "mpc_effort_mode": self.combo_effort,
             "target_box_delta": self.combo_target_box,
+            "interpolation_mode": self.combo_interpolation,
             "constraint_mode": self.combo_constraint,
             "man_currents": list(self.cur_spins),
             "fx": self.spin_fx,

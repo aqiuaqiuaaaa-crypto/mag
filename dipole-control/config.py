@@ -115,6 +115,8 @@ KALMAN_HZ = 30.0  # Kalman 状态估计
 MPC_HZ = 10.0  # MPC 控制器
 SOLVER_HZ = 10.0  # MDM 磁力逆解
 CURRENT_HZ = 30.0  # 电流执行层（插值+斜率+量化+串口）
+# Paired study did not support a universal direct default; retain legacy.
+EXECUTOR_INTERPOLATION_MODE = "legacy_three_frame"
 PWM_HZ = 20000.0  # PWM 频率（STM32/H 桥侧，Python 仅记录与配置）
 KALMAN_STALE_S = 0.15  # 保守软件门槛；age > 此值暂停 worker，非实机标定
 TARGET_STALE_HOLD_S = 0.30  # age > 此值冻结目标接受/插值，保持最后成功命令

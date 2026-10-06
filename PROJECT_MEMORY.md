@@ -2,7 +2,27 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 最新权威摘要（2026-10-06：10 Hz solver target box 9→27，第二层第3项）
+## 最新权威摘要（2026-10-06：CurrentExecutor 插值评估，第二层最后一项）
+
+- 起始稳定父HEAD=`2a1be54b5e1e668963f4ec756aa44b6084008a26`（`fix: align solver target box with control period`）；tracked clean、仅artifacts未跟踪，已核对ESO/MPC/target-box报告及生产链。本次独立checkpoint为 `refactor: make executor interpolation explicit`，不push、不操作真实COM/相机/实板。
+- **最终保留ON默认：`EXECUTOR_INTERPOLATION_MODE="legacy_three_frame"`**；增加 `direct` 可选，GUI路径页保存选择、下次start_tracking生效，一次追踪内固定。direct将已接受I_target交给原两层slew，不能绕过9/frame；库默认也legacy，旧调用保留。L3/steady_state、worker box27、manual等solver9、原gui_settings.json及其他所有参数不变。
+- 新seq的anchor是接受时last_sent×gain，不是上一target；legacy alpha1/3→2/3→1，每次fresh executor.step推进，失检提前返回不推进。提前新seq重锚，stale冻结seq/phase并hold，timeout/normal_stop仍原归零9，emergency仍硬零；restart新SharedState/executor，不继承旧I_est/phase。生产没有activation reward。**更正旧摘要简化**：GUI在executor前和成功发送后都更新SharedState.last_sent；异步求解可能读较早快照，但不是固定一帧滞后。
+- 正负step真实executor→GUI safety→43-byteUART全部执行：|S|1 ON[0,1,1]/OFF[1,1,1]，3/6/9 ON渐变三帧、OFF一帧，12/18 ON三帧、OFF两帧，27两者[9,18,27]。时间预算采用33.333ms/帧；真实注入调度接受和首写同tick0，send_tick值要减一帧；不把100ms三帧预算冒充实机UART延迟。
+- 连续A/B/C/D/E及1帧提前发布均覆盖，无旧目标回弹/phase残留。大27序列输出一致；小±3交替303帧，ON/OFF ΔRMS=1.982598/3.433960、Δ²RMS=2.282087/4.856352、≥8Hz采样HF功率3.030168%/11.111111%，lag L2均值4.826222/0。反转C中OFF的HF更低，不能声称ON总更平滑；构造C/E部分变化超过nominal27，仅作执行器压力案例。
+- Random：两mode×max_cmd50/99×20,000组=**80,000组/161,796实际UART帧**，各mode40,000组；slew/幅值/输出非有限/stale/seq倒退/stop后旧状态非零重启/overwrite违规全0。每limit/mode有190 stale检查、20,000 CAS拒绝、21 stop/restart；正常发送保持9，原急停与收紧上限clip例外不混入正常slew结论。
+- 复用正式生产闭环框架，固定L3+box27、全部既有物理/控制值，两profile×7工况×3 paired seed×2mode=84组，加4组150→300Hz独立plant积分复核，**88/88通过基本稳定/有限/正常发送检查**。四基础工况+无噪声/9tick视觉缺口/直角转弯反转至原finish；基础8s窗口未到终点，完成记不可用。无噪声重复seed不是独立随机证据。
+- **默认不能统一切OFF**：预登记14个profile/case组有5组失败。config默认nominal RMS .436438→.518775mm（+18.9%）、参考超前+.103021mm；无噪声RMS+.086316mm；gap RMS+.109055mm；corner RMS+.090743/max误差+.194803mm。保存GUI nominal RMS .202715→.156432mm改善；保存corner RMS也改善，但尾段切向均速1.451→1.282的绝对变化越过预登记.10门槛（OFF更接近1，不称危险）。阈值在试验前登记、未事后放宽；有限软件样本不证明所有实物稳定。
+- lag明确定义六轴target/gain−cmd_sent的L2 command，有效executor帧mean/median/p95/max、被替换未到达目标censored、首次每轴±1cmd到达帧预算均记录。保存nominal lag均值2.294→.732、到达预算56.528→36.806ms；config默认nominal lag反而.645→.819，闭环两边targets已不同，不能由isolated step推断所有lag都改善。command RMS/Δ/Δ²/HF/波动/速度/力/饱和/solver/endpoint全部见报告与JSON。
+- R-L source/数值不改：tau22.750ms、a30Hz=.23103144199243125、fc6.995821674Hz，同安全command序列2000帧两mode所有I/F诊断逐位一致，采样dI差因此相同。不同mode生成的command经过R-L仍有差异：固定位置混合轴step6 dI RMS .453345/.677409A/s，瞬态峰值2.281109/5.328005A/s，F差RMS4.094860µN；step27逐帧完全一致。构造力值不是闭环Fmax测试或实机结果。
+- 插值剩余作用是小中步的独立command平滑和额外延迟；box27/slew9只给幅值/速度硬界，MPC w_delta针对force，R-L不会抹掉所有command jerk。未证明插值在每种物理场景安全必需，也未证明它全冗余。保留ON因性能门槛未全通过；Direct供固定参数的后续实机A/B，仍需测相位/jitter/真实延迟、校准电流/PI饱和、轨迹/滑行/振动/热。
+- **父2a legacy golden**：两profile×8场景×normal/emergency，3840active+960stop ticks/4856UART帧；target/I/seq/anchor/phase、实际candidate入口、cmd/UART、F/KF/ESO/R-L/MPC状态/非计时solver/progress全部逐位一致，仅新增mode诊断与计时/callback排除。原L0及9d box9 golden也通过。
+- 日志只control105→106增加实际 `interpolation_mode`；worker56不变，原run/seq/I_target/alpha/frames_since/cmd字段复用，metadata记录实际/下次requested选择。原24列CSV、缓存、队列/写盘算法不变。CONTROL_LOG与新INTERPOLATION_VALIDATION已更新。
+- 新专项87/87+simulation/refinement88/88=**175/175**；Ruff/Black/mypy43文件，全部21套历史回归通过：GUI smoke、frames57、MPC6、shared6、solver25、bead8、CURT132、stop21、error46（原10warning）、serial46、freshness25（10,000tick jitter）、log25、path34、ESO/MPC42、历史sim33、L0 replay2、multirate18、target-box33/A-B16、watchdog integration7/C29。multirate本轮首测18/18。
+- 首次control-log23 pass/2 fail保留：旧类型检查漏mode字符串；原“确定性”双窗口测试只冻结wall-clock、仍用真实monotonic做freshness。已补mode合法枚举、该对照注入共同monotonic clock；真实QTimer/worker与逐位/开销断言保留，隔离整套25/25。首次Black新分支排版失败也保存，未降低任何生产/测试门槛。
+- 保护：151固件与11禁改PC文件原字节相同；SharedState/worker/update_est/apply_slew_cmd原source相同；移除mode选择后legacy executor AST相同；GUI其余116方法及安全模块函数、所有旧config值不变；control_log除一个字段外AST相同。没有改solver/observer/MPC/c/权重/Fmax/RL/freshness/path/frame/serial/CURT/offset/z/Fz/PI。
+- 权威报告 `dipole-control/INTERPOLATION_VALIDATION.md`；机器证据 `artifacts/interpolation-20261006/validation-results.json`、逐frame evidence、study-design、provenance/hash、regressions-initial/final、isolated log、quality-initial/final、protection、PNG300dpi/SVG/PDF及checkpoint/diff/status。artifacts不提交。第二层最后一项的软件评估与可切换结构完成；默认ON是证据驱动的结果，不表示尚未实施。
+
+## 上一阶段摘要（2026-10-06：10 Hz solver target box 9→27，第二层第3项）
 
 - 起始稳定父HEAD为 `9d0479e8655a1602bc45dd961f066be59dd94ad6`，tracked clean、仅artifacts未跟踪；最新ESO/MPC/第一层修复均在位。本摘要所在独立checkpoint为 `fix: align solver target box with control period`，不push；未操作真实COM/相机/实板。
 - 新默认：L3 FirstOrderESO+steady_state保持；**只有10Hz tracking worker box改27**，GUI路径页target box可选27/9、settings保存，config `WORKER_TARGET_DELTA_MAX=9`可回退。现存gui_settings.json缺少新键时默认27，原保存文件未修改；两套既有物理/权重覆盖保持。

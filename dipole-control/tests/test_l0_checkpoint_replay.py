@@ -24,6 +24,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import magnetic_dipole_pid as current
+import multirate as current_multi
 import test_gui_curt_telemetry as telemetry_tests
 from control_mode_simulation import configure_mode
 from PySide6.QtWidgets import QApplication, QMessageBox
@@ -180,6 +181,7 @@ def replay_checkpoint(
     *,
     base: str = BASE,
     controller_mode: str = "L0",
+    target_box_delta: int = 9,
 ) -> None:
     parent = load_parent(monkeypatch, base)
     old_gui, old_multi = parent["magnetic_dipole_pid"], parent["multirate"]
@@ -215,7 +217,8 @@ def replay_checkpoint(
                     current.MagneticDipoleControl(),
                 ]
                 configure_mode(windows[1], controller_mode)
-                windows[1].combo_target_box.setCurrentText("9")
+                windows[1].combo_target_box.setCurrentText(str(target_box_delta))
+                windows[1].combo_interpolation.setCurrentText("legacy_three_frame")
                 ports = [MemorySerial(), MemorySerial()]
                 count = 0
                 try:
@@ -246,8 +249,24 @@ def replay_checkpoint(
                         ) -> None:
                             nonlocal count
                             start = [len(port.frames) for port in ports]
-                            for window in windows:
-                                operation(window)
+                            candidates: list[list[Any]] = [[], []]
+                            for index, window in enumerate(windows):
+                                multi = old_multi if index == 0 else current_multi
+                                original_slew = multi.apply_slew_cmd
+
+                                def capture(
+                                    value: Any,
+                                    *args: Any,
+                                    original: Any = original_slew,
+                                    bucket: list[Any] = candidates[index],
+                                    **kwargs: Any,
+                                ) -> Any:
+                                    bucket.append(np.asarray(value).copy())
+                                    return original(value, *args, **kwargs)
+
+                                with patch.object(multi, "apply_slew_cmd", capture):
+                                    operation(window)
+                            exact(candidates[0], candidates[1], mode + ".candidate")
                             frames = [port.frames[i:] for port, i in zip(ports, start)]
                             assert frames[0] == frames[1], (mode, stop)
                             assert all(len(frame) == 43 for frame in frames[0])
@@ -315,7 +334,7 @@ def replay_checkpoint(
     evidence = {
         "parent": base,
         "controller_mode": controller_mode,
-        "target_box_delta": 9,
+        "target_box_delta": target_box_delta,
         "profile": profile,
         "status": "PASS",
         "cases": cases,

@@ -761,12 +761,21 @@ class ControlWorker(threading.Thread):
 class CurrentExecutor:
     """30Hz 电流执行层：目标插值 → 斜率限幅 → 量化 → RL 估计 → 正向模型 → 诊断"""
 
-    def __init__(self, clock: Callable[[], float] | None = None) -> None:
+    def __init__(
+        self,
+        clock: Callable[[], float] | None = None,
+        *,
+        interpolation_mode: str = "legacy_three_frame",
+    ) -> None:
+        if interpolation_mode not in ("legacy_three_frame", "direct"):
+            raise ValueError("interpolation_mode must be legacy_three_frame or direct")
+        # Library default preserves old callers; GUI passes its per-run choice.
+        self.interpolation_mode = interpolation_mode
         self.clock = clock  # None inherits the SharedState monotonic domain
         self.stale_status = "FRESH"
         self.target_age_s = 0.0
         self.seq = -1
-        self.I_from = np.zeros(6)  # 上一目标（A）
+        self.I_from = np.zeros(6)  # 新 seq 接受时的 last_sent（A）
         self.I_to = np.zeros(6)  # 当前目标（A）
         self.frames_since = 0
         self.I_est = np.zeros(6)  # RL 模型估计电流（非测量值）
@@ -789,7 +798,12 @@ class CurrentExecutor:
             # Do not accept even an unseen expired seq or advance interpolation.
             # RL/forward diagnostics continue for the actually held command.
             diag = self.update_est(dt, pos_m, solver, last_sent)
-            diag["interp_alpha"] = min((self.frames_since + 1) / 3.0, 1.0)
+            diag["interp_alpha"] = (
+                min((self.frames_since + 1) / 3.0, 1.0)
+                if self.interpolation_mode == "legacy_three_frame"
+                else 1.0
+            )
+            diag["interpolation_mode"] = self.interpolation_mode
             diag["stale_status"] = self.stale_status
             diag["stop_requested"] = self.stale_status == "STALE_TARGET_TIMEOUT"
             return diag
@@ -801,8 +815,14 @@ class CurrentExecutor:
         else:
             self.frames_since += 1
         # 1) 窗口内插值（α = 1/3, 2/3, 1，之后保持）
-        alpha = min((self.frames_since + 1) / 3.0, 1.0)
-        I_interp = self.I_from + alpha * (self.I_to - self.I_from)
+        if self.interpolation_mode == "legacy_three_frame":
+            alpha = min((self.frames_since + 1) / 3.0, 1.0)
+            I_interp = self.I_from + alpha * (self.I_to - self.I_from)
+        else:
+            alpha = 1.0
+            I_interp = (
+                self.I_to
+            )  # Latest accepted target, still through both slew layers.
         # 2) 斜率限幅 + 幅值限幅 + 量化（安全层）
         cmd = apply_slew_cmd(
             I_interp, last_sent, max_cmd=max_cmd, current_gain=solver.current_gain
@@ -811,6 +831,7 @@ class CurrentExecutor:
         diag = self.update_est(dt, pos_m, solver, cmd)
         diag["cmd"] = cmd
         diag["interp_alpha"] = alpha
+        diag["interpolation_mode"] = self.interpolation_mode
         return diag
 
     def update_est(self, dt, pos_m, solver, cmd):

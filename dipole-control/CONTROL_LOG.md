@@ -4,8 +4,8 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 
 选 `run.csv` 时，一个会话产生：
 
-- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，104 列。
-- `run.worker.csv`：每次完成的 MPC/solver 诊断或 STALE_INPUT / PATH_DEVIATION 跳过事件一行，约 10 Hz，55 列；原有手动导出 MPC CSV 的格式和内容保留。
+- `run.csv`：每个完成的主循环 tick 一行，约 30 Hz，106 列。
+- `run.worker.csv`：每次完成的 MPC/solver 诊断或 STALE_INPUT / PATH_DEVIATION 跳过事件一行，约 10 Hz，56 列；原有手动导出 MPC CSV 的格式和内容保留。
 - `run.metadata.json`：开始记录时 GUI/config、MPC 权重、物理参数、R、B 目标、路径、模式、command/current 限制；Git HEAD 和 tracked dirty 标志由写盘线程读取。`R_force_model_to_camera` 是 model XY → camera world XY 的正交映射；`offset.position_mm` 保存当前 `frame_offset_mm` 的 XY 与固定 z=0，来源为 `config.FRAME_OFFSET_MM`，含义是模型原点在相机世界坐标中的位置（默认 `[0,0]`，尚未实机标定）。ADC offset 仍为 `0/default`，原有像素中心也保留；freshness 门槛由现有 config 快照记录。
 - `run.summary.json`：正常结束时两个流分别的 attempted / accepted / written / dropped / rejected 和日志错误。
 
@@ -31,7 +31,7 @@ GUI 的“控制日志”页 → 选择**新的** CSV 名称 → “开始记录
 | 模型 | `I_est_0`…`I_est_5`, `F_est_x`, `F_est_y`, `F_est_z`, `B_x`, `B_y`, `B_z`, `B_mag_mT`, `align_ratio`, `low_field` | float A / µN / T / mT / 无量纲，bool 低场；来自已有执行器/R-L 诊断，不重新 forward_model；executor 未更新时保持上次模型值，并由 executor_updated 标明 |
 | ADC | `adc_frame_count`, `adc_age_ms`, `raw0`…`raw5`, `adc_valid`, `adc_running`, `adc_error_flags` | int MCU frame_count、float 距 PC 最近收到快照的 ms、int raw/状态/flags；仅监测，不转换成 A、不进入控制 |
 
-空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode/effort_mode/stale_status 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
+空单元格表示不可用或本 tick 没有执行，**不代填 0**。CSV bool 为 `True`/`False`；除 mode/estimator_mode/eso_mode/effort_mode/interpolation_mode/stale_status 外，非空单元格可按表转成 int/float/bool。模型诊断在首次 executor 执行之前不可用；手动电流模式不经过 CurrentExecutor，cmd_exec 留空，但每个 tick 仍记录最终 cmd_sent。退出、连接、急停等发生在 tick 之外的 UART 事件不单独增加控制行。
 
 `I_target` 是 solver 发布的目标电流；`I_est` 是 R-L 估计；`raw` 是未标定 ADC。三者用途和单位不同。通道顺序保持 a0…a5 / `+X,+Y,+Z,-X,-Y,-Z` / Pole `1,3,5,4,6,2`。
 
@@ -87,6 +87,14 @@ control 增至 105 列、worker 增至 56 列；两个流各仅新增 `target_bo
 字段由已发布 target 的 rec 经原 `(run, seq)` 缓存关联，control 表示 executor 实际采用的目标；GUI 刚从 27 切成 9 而 worker 尚未发布时，旧 seq 仍记录 27。STALE_INPUT / PATH_DEVIATION 等未求解事件留空；手动求解不使用周期 box，保持旧每帧 9。
 
 目标命令继续由已有六列 `round(I_target_i / current_gain_A_per_cmd)` 还原；实际命令继续用 `cmd_exec_i` / `cmd_sent_i`。会话 metadata 的 limits 增加初始 `target_box_delta`，已有 settings 也保存该 GUI 选择。solver_ms / solver flags / current_constraint_active 等原诊断保留，24 列历史 MPC CSV 和队列/磁盘线程不变。默认 27、GUI 路径页或 config `WORKER_TARGET_DELTA_MAX=9` 可回退。正常执行和 normal_stop 仍受每帧 ±9；原 emergency_stop 的直接零帧例外保持。
+
+## 执行插值模式（2026-10-06）
+
+control 仅新增字符串 `interpolation_mode`（106列），worker 保持56列；值为本次 executor 实际采用的 `legacy_three_frame` 或 `direct`。GUI 路径页选择保存到 settings，**下一次 start_tracking 生效**；一次追踪内固定模式。metadata 同时记录实际模式与下一次请求的 `interpolation_requested`。现有无新键的设置使用 config 默认。
+
+legacy：接受新 seq 时以当时 `last_sent*current_gain` 为 I_from，alpha 为1/3、2/3、1；direct：alpha 恒1，候选为已接受 I_target。两者都经过原 executor 和发送 safety。已有 `run/seq/I_target/alpha/frames_since/cmd_exec/cmd_sent` 足够复原处理链；重新接受新 seq 的首帧可由上一帧成功 cmd_sent 还原 anchor。缺口时 phase 不推进；过期未采用的 worker seq 不能混入当前目标。manual 的 update_est 使用模式字段仅作 executor 实例诊断，不表示进行了目标插值。
+
+当前默认及完整证据见 [INTERPOLATION_VALIDATION.md](INTERPOLATION_VALIDATION.md)。
 
 ## 计数与故障
 
