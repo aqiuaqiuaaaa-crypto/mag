@@ -33,6 +33,9 @@ CMD_TO_A = MAX_CURRENT_A / CMD_MAX  # I_A = command × (2/99)
 # 每帧电流变化率：满量程 2A 的 10% = 0.2A。
 # 指令为整数，10 指令 ≈ 0.2020 A 略超 0.2A，故取 9 指令 = 0.1818 A，严格 ≤ 0.2 A/帧。
 MAX_DELTA_CMD = 9
+# 10 Hz worker target half-width about last actually sent command.
+# Nominal 3 x 30 Hz frames per period; final per-frame safety stays at 9.
+WORKER_TARGET_DELTA_MAX = 27  # select 9 for legacy A/B and rollback
 MAX_DELTA_A = MAX_DELTA_CMD * CMD_TO_A  # ≈ 0.1818 A
 
 # ---------- 串口 ----------

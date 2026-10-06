@@ -71,6 +71,7 @@ def run_simulation(
     noise: bool = True,
     vision_gap: bool = False,
     profile: str = "defaults",
+    target_box_delta: int = 9,
 ) -> dict[str, Any]:
     """Return metrics and per-tick trace; caller disables real worker scheduling."""
     factor, friction = SCENARIOS[scenario]
@@ -100,6 +101,7 @@ def run_simulation(
     clock = SimulationClock()
     port = SimulationSerial()
     configure_mode(widget, mode)
+    widget.combo_target_box.setCurrentText(str(target_box_delta))
     widget.control_clock = clock
     widget.shared = SharedState(clock=clock)
     widget.executor = CurrentExecutor(clock=clock)
@@ -177,6 +179,15 @@ def run_simulation(
                 "F_est_uN": diagnostic_force[:2].tolist(),
                 "u_eso_uN": previous_force[:2].tolist(),
                 "cmd": cmd.tolist(),
+                "target_cmd": (
+                    snapshot["currents"] / widget.solver.current_gain
+                ).tolist(),
+                "solver_ms": float(snapshot["solver_time_ms"]),
+                "s_progress": float(widget.shared.get_progress().s_progress),
+                "target_box_delta": target_box_delta,
+                "current_constraint_active": bool(
+                    (snapshot["rec"] or {}).get("current_constraint_active", False)
+                ),
                 "seq": snapshot["seq"],
                 "alpha": (widget.last_diag or {}).get("interp_alpha"),
                 "worker_status": widget.shared.get_freshness()["worker_status"],
@@ -196,7 +207,22 @@ def run_simulation(
     )
     changes = np.diff(commands, axis=0)
     reversals = (changes[1:] * changes[:-1]) < 0
+    published = [
+        r for i, r in enumerate(trace) if i == 0 or r["seq"] != trace[i - 1]["seq"]
+    ]
+    target_changes = np.diff(np.array([r["target_cmd"] for r in published]), axis=0)
+    solver_times = np.array([r["solver_ms"] for r in published])
     result = {
+        "target_box_delta": target_box_delta,
+        "max_target_delta_cmd": float(np.max(abs(target_changes))),
+        "solver_mean_ms": float(solver_times.mean()),
+        "solver_p95_ms": float(np.percentile(solver_times, 95)),
+        "final_s_progress_mm": float(trace[-1]["s_progress"]),
+        "constraint_active_ratio": float(
+            np.mean([r["current_constraint_active"] for r in published])
+        ),
+        "max_tracking_error_mm": float(np.max(np.linalg.norm(errors, axis=1))),
+        "max_ahead_reference_mm": float(np.max(errors[:, 0])),
         "mode": mode,
         "scenario": scenario,
         "profile": profile,

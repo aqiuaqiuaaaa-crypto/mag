@@ -2,7 +2,24 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 最新权威摘要（2026-10-06：FirstOrderESO + MPC steady-state effort，第二层首个独立任务）
+## 最新权威摘要（2026-10-06：10 Hz solver target box 9→27，第二层第3项）
+
+- 起始稳定父HEAD为 `9d0479e8655a1602bc45dd961f066be59dd94ad6`，tracked clean、仅artifacts未跟踪；最新ESO/MPC/第一层修复均在位。本摘要所在独立checkpoint为 `fix: align solver target box with control period`，不push；未操作真实COM/相机/实板。
+- 新默认：L3 FirstOrderESO+steady_state保持；**只有10Hz tracking worker box改27**，GUI路径页target box可选27/9、settings保存，config `WORKER_TARGET_DELTA_MAX=9`可回退。现存gui_settings.json缺少新键时默认27，原保存文件未修改；两套既有物理/权重覆盖保持。
+- 原9具体来源：dipole_solver模块MAX_DELTA_CMD=9，正式solve_field_force_pseudoinverse的max_delta_cmd默认/guard及ceil/floor整数箱；worker没传delta所以每100ms也9。新增keyword-only target_box_delta显式9/27覆盖**目标半宽**；直接逐帧solver仍默认9，其他solver接口及有界/物理算法未变。
+- **box中心是SharedState的上一实际发送命令快照，不是上一理想target**；GUI在executor前发布快照，可能落后一帧。本次只改半宽，center/时序不改；相邻理想target的差分不必普遍≤box。30/10=3、3×9=27是nominal周期可达范围，独立QTimer33ms/worker100ms有jitter，非严格每seq三帧。
+- CurrentExecutor接受seq仍以当时last_sent锚定I_from、frames_since=0、alpha1/3→2/3→1；完整原source/AST一致。apply_slew_cmd与GUI send_commands/apply_slew仍9，max_cmd仍保护；manual force/direction/calibration逐ticksolver9，manual current/coil scan直接发送9。normal_stop/timeout原归零9；原emergency_stop硬零帧绕过slew，以及收紧幅值上限优先硬clip的例外保持。
+- 新专项**49/49**：target-box33（含两profile父回放）+L3 A/B16。基本/符号/六轴/单轴/边界/非法模式、正交及真实JSON inactive全字段字节等价、worker中心、freshness/拒绝发布seq-progress、stop/手动/持久化/日志均覆盖。S=±27经真实目标箱/插值/GUI/UART测得t90：box9 **300.000ms**，box27 **100.000ms**，无硬编码时间答案。
+- 随机property：max_cmd50/99各10000组，共20000组/40068真实43-byte UART帧，含仅1/2帧提前更新；每帧最大变化9、幅值合法、phase重置/三帧正常到达/不旧target回弹。只stub磁forward诊断，executor/两安全层/量化/GUI发送及frame builder为生产代码。
+- 闭环只比较L3 box9/27，复用父正式框架和噪声/150Hz独立R-L/plant；两profile×nominal/friction/drag/friction+drag16组，每组240帧/80发布；全部无明显发散、actual sent≤9、MPC力饱和0，保留速度RMS/target变化/实际变化/命令饱和/solver_ms/Ftarget/Fest/progress/波动/超前等指标。保存GUI box27后4s速度（nominal/friction/drag/combined）=0.995153/1.005440/1.009007/1.011237mm/s；详情两套表见TARGET_BOX_VALIDATION。未重调c/RL/Q/R/权重/Fmax/场/物理值，不保证实机更好或完整终点无overshoot。
+- 隔离性能：真实JSON正式solver，defaults/saved每种box各1000次、总4000，配对同输入/交替顺序、warmup排除；active/inactive分支与mean/median/p95/p99/max全部保存。无非有限数/数值退出/约束越界；nonconverged原force/field旗标与数值失败区分，未改原门槛。有界分支原几十ms仍在，不声称始终低于33ms。
+- **9d0479e父L3 box9逐位回放**：两profile、8场景×normal/emergency，3840 active+960 stop ticks、4856UART帧；worker target/I_target/seq/executor/R-L/KF/ESO/progress/所有父非计时solver字段float64 bytes相同。原8549 L0回放也保持通过（4856帧）。仅计时/callback与新增纯诊断排除。
+- 日志仅control104→105、worker55→56，各加target_box_delta，按原run+seq关联实际采用目标；I_target/gain还原cmd_target，原cmd_exec/cmd_sent/solver/status/saturation复用；settings/metadata记录选择，原24列CSV/队列/写盘线程不改。见CONTROL_LOG.md。
+- 全部相关回归通过：Ruff/Black/mypy40文件；GUI smoke、frames57、MPC6、shared6、solver25、bead8、CURT132、stop21、serial46、log25、freshness25（10000tick jitter）、path34、ESO/MPC42、历史sim33、L0 replay2、multirate18、error46（原10绘图warning）、watchdog integration7/C29、上述target49。本轮完整multirate首测18/18，无门槛放宽；新测试初轮构造器/控件名/trace/静态问题已修正记录。
+- 保护：151固件、10禁改PC文件原字节相同（含ESO/MPC/保存设置）；CurrentExecutor原source一致、SharedState guards/per-frame slew原样；GUI其余118方法、solver其余39方法AST相同，所有既有config值相同。未改interpolation phase/activation/频率/serial/watchdog/frame/path/freshness/current PI/CURT/offset/z/Fz。
+- 完整报告 `dipole-control/TARGET_BOX_VALIDATION.md`；机器证据 `artifacts/target-box-20261006/validation-results.json`、benchmark两profile、regressions、quality-final、protection、stdout/stderr及checkpoint/diff/status。artifacts不提交。下一checkpoint再独立评估interpolation；本轮保持原样。
+
+## 上一阶段摘要（2026-10-06：FirstOrderESO + MPC steady-state effort，第二层首个独立任务）
 
 - 首先核对 Git：父 HEAD 为 `8549352e492e4d9cde2cc4142001fcada7ff994a`（`fix: unify path progress tracking`），tracked worktree clean，仅 artifacts/ untracked。前七项第一层修复在源码和最新记忆中一致。本轮只修 observer/effort 的闭环阶次一致性；不操作真实 COM/相机/实板，不构建/烧录/修改固件。
 - **实际配置有两套**：config 默认 MPC 权重 1/2/.005/.01、Fmax=40；现存 `gui_settings.json` 启动覆盖为 40/.8/.02/.001、Fmax=50、gain=.02、Br=.35、场方向+Z、lift off。保存文件原字节保留，不把 config 默认实验冒充现存 GUI 启动配置。两套配置都做了仿真与父回放。

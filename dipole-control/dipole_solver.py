@@ -1343,13 +1343,17 @@ class DipoleSolver:
         force_scale_N=None,
         rcond=1e-10,
         bounded_l2_weight=1e-8,
+        *,
+        target_box_delta=None,
     ):
         """按文献的整体驱动矩阵，用 Moore–Penrose 伪逆求六路电流。
 
         对无量纲矩阵 W A_BF 求 ``pinv(W A_BF) @ W y``。无安全约束激活时，
         这是达到 [B_des;F_des] 的最小二范数电流；约束激活时，精确求箱约束
         线性最小二乘。最后在整数指令邻域选择输出残差最小、电流二范数次小的
-        实际发送指令。
+        量化 target 指令。直接逐帧调用仍默认 ±9；10 Hz worker 可显式传入
+        target_box_delta=9 或 27，中心仍是 cmd_prev（实际已发送命令）。
+        target box 不替代 executor / GUI 的逐帧安全层。
         """
         t0 = time.perf_counter()
         pos = np.asarray(pos, dtype=np.float64)
@@ -1362,6 +1366,11 @@ class DipoleSolver:
             raise ValueError(f"max_cmd 必须在 1~{CMD_MAX}")
         if not (0 <= max_delta_cmd <= MAX_DELTA_CMD):
             raise ValueError(f"max_delta_cmd 必须在 0~{MAX_DELTA_CMD}")
+
+        if target_box_delta is not None:
+            if target_box_delta not in (9, 27):
+                raise ValueError("target_box_delta 必须为 9 或 27")
+            max_delta_cmd = target_box_delta
 
         A, b_hat = self.field_force_actuation_matrix(pos, B_direction)
         B_des = B_magnitude_mT * 1e-3 * b_hat

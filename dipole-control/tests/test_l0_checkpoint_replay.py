@@ -55,11 +55,20 @@ def exact(left: Any, right: Any, path: str) -> None:
         assert left == right, path
 
 
-def load_parent(monkeypatch: pytest.MonkeyPatch) -> dict[str, ModuleType]:
+def load_parent(
+    monkeypatch: pytest.MonkeyPatch, base: str = BASE
+) -> dict[str, ModuleType]:
     loaded: dict[str, ModuleType] = {}
-    for name in ("config", "estimators", "mpc", "multirate", "magnetic_dipole_pid"):
+    for name in (
+        "config",
+        "dipole_solver",
+        "estimators",
+        "mpc",
+        "multirate",
+        "magnetic_dipole_pid",
+    ):
         source = subprocess.check_output(
-            ["git", "show", f"{BASE}:dipole-control/{name}.py"], cwd=ROOT
+            ["git", "show", f"{base}:dipole-control/{name}.py"], cwd=ROOT
         )
         module = ModuleType(f"_l0_parent_{name}")
         module.__file__ = str(ROOT / "dipole-control" / f"{name}.py")
@@ -124,7 +133,7 @@ def states(left: Any, right: Any, mode: str) -> None:
         if left.worker._mpc_signature is not None:
             exact(
                 left.worker._mpc_signature,
-                right.worker._mpc_signature[:7],
+                right.worker._mpc_signature[: len(left.worker._mpc_signature)],
                 mode + ".signature",
             )
         for name in ("mpc_x", "mpc_y"):
@@ -163,11 +172,16 @@ class ReplayCamera:
         pass
 
 
-@pytest.mark.parametrize("profile", ["defaults", "saved"])
-def test_l0_parent_full_control_and_stop_replay(
-    app: QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
+def replay_checkpoint(
+    app: QApplication,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    profile: str,
+    *,
+    base: str = BASE,
+    controller_mode: str = "L0",
 ) -> None:
-    parent = load_parent(monkeypatch)
+    parent = load_parent(monkeypatch, base)
     old_gui, old_multi = parent["magnetic_dipole_pid"], parent["multirate"]
     settings_path = tmp_path / "settings.json"
     if profile == "saved":
@@ -200,7 +214,8 @@ def test_l0_parent_full_control_and_stop_replay(
                     old_gui.MagneticDipoleControl(),
                     current.MagneticDipoleControl(),
                 ]
-                configure_mode(windows[1], "L0")
+                configure_mode(windows[1], controller_mode)
+                windows[1].combo_target_box.setCurrentText("9")
                 ports = [MemorySerial(), MemorySerial()]
                 count = 0
                 try:
@@ -298,7 +313,9 @@ def test_l0_parent_full_control_and_stop_replay(
                         window.save_settings = lambda: None
                         window.close()
     evidence = {
-        "parent": BASE,
+        "parent": base,
+        "controller_mode": controller_mode,
+        "target_box_delta": 9,
         "profile": profile,
         "status": "PASS",
         "cases": cases,
@@ -308,9 +325,17 @@ def test_l0_parent_full_control_and_stop_replay(
         "exclusions": [
             "performance timing",
             "clock callback identity",
-            "added mode/F_ss diagnostics",
+            "added mode/F_ss/target_box diagnostics",
         ],
     }
     (tmp_path / "replay-results.json").write_text(
         json.dumps(evidence, indent=2), encoding="utf8"
     )
+    print("REPLAY_EVIDENCE " + json.dumps(evidence))
+
+
+@pytest.mark.parametrize("profile", ["defaults", "saved"])
+def test_l0_parent_full_control_and_stop_replay(
+    app: QApplication, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, profile: str
+) -> None:
+    replay_checkpoint(app, monkeypatch, tmp_path, profile)

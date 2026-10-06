@@ -58,6 +58,7 @@ CONTROL_FIELDS = (
     "state_vy_mm_s",
     "eso_mode",
     "effort_mode",
+    "target_box_delta",
     "F_ss_x",
     "F_ss_y",
     "eso_updated",
@@ -119,6 +120,7 @@ WORKER_FIELDS = (
     "d_used_y",
     "eso_mode",
     "effort_mode",
+    "target_box_delta",
     "F_ss_x",
     "F_ss_y",
     "F_prev_x",
@@ -254,6 +256,8 @@ class ControlLogger:
                 F_target_y=float(target["F_target"][1]),
             )
             rec = target.get("rec") or {}
+            if "target_box_delta" in rec:
+                row["target_box_delta"] = int(rec["target_box_delta"])
             if "mpc_effort_mode" in rec:
                 row["effort_mode"] = str(rec["mpc_effort_mode"])
                 for axis, value in zip(("x", "y"), rec["F_ss_camera_uN"]):

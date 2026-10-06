@@ -80,6 +80,14 @@ worker 是唯一 progress 计算者；SharedState 保存冻结的 PathProgress�
 
 STALE_INPUT/慢求解被拒绝时不推进进度。PATH_DEVIATION 的 worker 行沿用旧 seq，未计算的 target/solver 列为空；其 path_deviation 为True。30 Hz progress 取最新 SharedState，故即使已结束但执行器尚未采用最终 seq，finished 仍正确记录True。参考/F/I字段仍表示实际执行器采用的目标，不能误认为它们永远和最新 progress 属于同一 seq。
 
+## 10 Hz solver target box（2026-10-06）
+
+control 增至 105 列、worker 增至 56 列；两个流各仅新增 `target_box_delta`，值为 9 或 27 command。该半宽以 worker 读取的上一实际发送命令快照为中心，不是 30 Hz 每帧 slew，也不是上一理想 target 的差分限制。
+
+字段由已发布 target 的 rec 经原 `(run, seq)` 缓存关联，control 表示 executor 实际采用的目标；GUI 刚从 27 切成 9 而 worker 尚未发布时，旧 seq 仍记录 27。STALE_INPUT / PATH_DEVIATION 等未求解事件留空；手动求解不使用周期 box，保持旧每帧 9。
+
+目标命令继续由已有六列 `round(I_target_i / current_gain_A_per_cmd)` 还原；实际命令继续用 `cmd_exec_i` / `cmd_sent_i`。会话 metadata 的 limits 增加初始 `target_box_delta`，已有 settings 也保存该 GUI 选择。solver_ms / solver flags / current_constraint_active 等原诊断保留，24 列历史 MPC CSV 和队列/磁盘线程不变。默认 27、GUI 路径页或 config `WORKER_TARGET_DELTA_MAX=9` 可回退。正常执行和 normal_stop 仍受每帧 ±9；原 emergency_stop 的直接零帧例外保持。
+
 ## 计数与故障
 
 正常停止排空后，每个流 `attempted = written + dropped + rejected`；无错误、无停止后额外生产时 rejected=0。CSV 中 dropped 是**写入该行之前**的累计溢出数；末尾溢出由 summary 补齐，不能只依赖最后一行。两个流共享队列，但 summary 各自计数。

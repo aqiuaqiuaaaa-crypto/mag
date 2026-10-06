@@ -78,6 +78,7 @@ class SharedState:
             "mpc_w_u": cfg.MPC_W_U,
             "mpc_w_du": cfg.MPC_W_DU,
             "mpc_effort_mode": cfg.MPC_EFFORT_MODE,
+            "target_box_delta": cfg.WORKER_TARGET_DELTA_MAX,
             "eso_mode": cfg.ESO_MODE,
             "fz_lift": 0.0,
             "eso_d": np.zeros(2),
@@ -519,6 +520,9 @@ class ControlWorker(threading.Thread):
             ),
             cmd_prev=last_sent,
             max_cmd=int(params.get("max_cmd", cfg.CMD_MAX)),
+            target_box_delta=params.get(
+                "target_box_delta", cfg.WORKER_TARGET_DELTA_MAX
+            ),
         )
         solver_ms = (time.perf_counter() - t1) * 1e3
 
@@ -543,6 +547,9 @@ class ControlWorker(threading.Thread):
             rec["requested_B_direction"] = model_to_cam_vec(bd_model, R)
         rec["requested_force_camera"] = F_target * 1e-6
         # Observation-only association with the target actually consumed at 30Hz.
+        rec["target_box_delta"] = params.get(
+            "target_box_delta", cfg.WORKER_TARGET_DELTA_MAX
+        )
         rec["mpc_effort_mode"] = self.mpc_x.effort_mode
         rec["F_ss_camera_uN"] = c_drag * np.asarray(vref[0]) - eso_d
 

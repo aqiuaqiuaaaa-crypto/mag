@@ -1166,6 +1166,14 @@ class MagneticDipoleControl(QMainWindow):
         self.combo_effort.setCurrentText(cfg.MPC_EFFORT_MODE)
         self.combo_effort.setToolTip("steady_state: c·v_ref−d；absolute: 历史零中心")
         mg.addWidget(self.combo_effort, 4, 1, 1, 3)
+        mg.addWidget(QLabel("10 Hz target box (cmd)"), 5, 0)
+        self.combo_target_box = QComboBox()
+        self.combo_target_box.addItems(["27", "9"])
+        self.combo_target_box.setCurrentText(str(cfg.WORKER_TARGET_DELTA_MAX))
+        self.combo_target_box.setToolTip(
+            "相对上一实际发送命令的目标半宽；27 为周期级范围，9 为 legacy。每帧发送仍 ≤9。"
+        )
+        mg.addWidget(self.combo_target_box, 5, 1, 1, 3)
         v.addWidget(mpc_box)
 
         h = QHBoxLayout()
@@ -1842,6 +1850,7 @@ class MagneticDipoleControl(QMainWindow):
                 "max_cmd": self._current_cmd_limit(),
                 "cmd_abs": cfg.CMD_MAX,
                 "max_delta_cmd": cfg.MAX_DELTA_CMD,
+                "target_box_delta": int(self.combo_target_box.currentText()),
                 "max_current_A": cfg.MAX_CURRENT_A,
                 "current_gain_A_per_cmd": (
                     self.solver.current_gain if self.solver else None
@@ -3310,6 +3319,7 @@ class MagneticDipoleControl(QMainWindow):
                 "mpc_w_u": self.spin_mpc_w_u.value(),
                 "mpc_w_du": self.spin_mpc_w_du.value(),
                 "mpc_effort_mode": self.combo_effort.currentText(),
+                "target_box_delta": int(self.combo_target_box.currentText()),
                 "eso_mode": self._eso_mode(),
                 "max_active": self.n_coils_total,
                 "mpc_on": self.tracking,
@@ -3597,6 +3607,7 @@ class MagneticDipoleControl(QMainWindow):
             "mpc_w_u": self.spin_mpc_w_u,
             "mpc_w_du": self.spin_mpc_w_du,
             "mpc_effort_mode": self.combo_effort,
+            "target_box_delta": self.combo_target_box,
             "constraint_mode": self.combo_constraint,
             "man_currents": list(self.cur_spins),
             "fx": self.spin_fx,
