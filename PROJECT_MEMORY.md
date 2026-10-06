@@ -895,7 +895,11 @@ LIVE = 新鲜且 valid/running=1、error_flags=0；超过 500 ms 没有完整 AD
 
 ## 后续实板操作（本轮未执行）
 
-1. 由用户确认并烧录 `artifacts/curt-telemetry-20261003/pwm_02.hex`，复位；本轮未重新构建或烧录固件。
+1. 当前首次实板烧录使用 canonical HEX（相对仓库根目录）：
+   `pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.hex`，46,798 bytes；
+   SHA-256=`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`。
+   烧录前必须核对 SHA-256，不按文件名判断版本，不使用历史 `artifacts/curt-telemetry-20261003/` HEX。
+   正式规则见 [FIRMWARE_BUILD_SOP.md](FIRMWARE_BUILD_SOP.md)。当前 authoritative HEX 尚未烧录；核对无误后由用户确认并烧录、复位。
 2. 关闭独立 curt_telemetry.py 与串口助手对同一 COM 的占用，在 dipole-control 目录启动主 GUI，选实际 COM 后连接。连接按原流程发送全零帧；先保持控制停止，可先不打开相机。
 3. 在 CURT / ADC 页观察 LIVE、raw0...raw5、valid=running=1、error_flags 与错误计数，以及 timestamp/data age 是否持续更新；正常约 10 Hz telemetry 对应 frame_count 每帧约 +50、总体约 +500/s。
 4. 选择新的 ADC CSV，开始记录后停止，检查独立 15 列和逻辑 raw 顺序；断开/重连验证旧半帧/快照不延续，普通停止/急停后接收仍工作。

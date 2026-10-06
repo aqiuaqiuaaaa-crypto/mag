@@ -87,9 +87,16 @@ echo fairness/latest queue, tick wrap, ISR/masked rejection, DMA versus UART-TC
 ownership, HAL busy/error, silent DMA-start failure, asynchronous DMA error,
 completion during status inspection and pending RX with the shared HAL lock.
 
-All logs, current-source input hashes, final HEX/AXF/MAP and Keil output are saved
-in root `artifacts/curt-telemetry-20261003/`. The original project output directory
-still contains historical binaries; use the HEX in the artifact directory.
+Historical telemetry logs, input hashes, HEX/AXF/MAP and Keil output are preserved
+in root `artifacts/curt-telemetry-20261003/` as historical validation evidence,
+not the current official flashing entry point.
+
+For current official flashing, use the canonical HEX (relative to repository root):
+`pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.hex` (46,798 bytes). Verify
+authoritative SHA-256 `88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`
+before flashing; do not choose by filename or use the historical telemetry HEX.
+Official build / release rules: [FIRMWARE_BUILD_SOP.md](../../FIRMWARE_BUILD_SOP.md).
+The current authoritative HEX has not been flashed.
 
 ## Command timeout and hardware shutdown (2026-10-05)
 
