@@ -13,7 +13,7 @@ Camera → Vision → Kalman/EMA/RAW + ESO → Path Reference → SharedState
 保留 GUI 目标磁场方向/模长、模型到相机坐标标定、Fz 减摩、手动六路电流、
 手动磁力和诊断/标定。2026-10-04 移除旧 PD/PID 实机自动控制链；入口文件名仍为
 `magnetic_dipole_pid.py`。强化学习 RL/ES-MLP 已于 2026-10-04 从正式工程移除；
-独立仿真器保留；CURT 遥测已集成主 GUI 的“CURT / ADC”页，独立 CLI 继续保留。
+独立仿真器保留。2026-10-28 已移除 CURT/ADC 测量链，主 GUI 只负责现有视觉与 MPC 控制。
 
 ## 运行方法
 
@@ -43,9 +43,6 @@ python magnetic_dipole_pid.py    # 启动 GUI
 | `magnetic_dipole_pid.py` | MPC-only PySide6 实机 GUI（30Hz 主循环 + 10Hz 工作线程） |
 | `tests/test_solver.py` | 25 项严格单元测试 |
 | `smoke_test.py` | 无头冒烟测试（不需相机/串口） |
-| `curt_telemetry.py` | 共享 ADCStreamDecoder / ADCSnapshot / CSV 格式，以及独立接收 CLI |
-| `adc_csv.py` | GUI ADC CSV 的有界队列与独立写盘线程，不访问串口或控制状态 |
-| `tests/test_gui_curt_telemetry.py` | 主 GUI 接收、生命周期、监视隔离与 CSV 回归测试 |
 | `models/N30LM_six_coils_180dipoles.json` | 标定偶极子模型 |
 
 ## 系统规格（严格固定）
@@ -268,99 +265,20 @@ RL/ES-MLP 曾作为独立实验路线存在；其 GUI、策略部署、训练代
 - 指令量化 0.0202A/格：小力目标下 2% 收敛判据可能因量化不可达（单元测试与 CSV
   如实记录），闭环控制可校正。
 
-## 主 GUI CURT / ADC 监视（2026-10-04）
+## 当前固件与控制日志（2026-10-28）
 
-启动 `magnetic_dipole_pid.py`，使用顶部原有串口连接，再进入“CURT / ADC”页。
-主 GUI 是该 COM 的唯一所有者：同一个 `self.ser` 发送原 a0...a5 signed 指令并接收
-`@ADC`。不要同时运行独立 `curt_telemetry.py` 或其他程序打开同一端口。
+CURT/ADC 页面、接收器、专属 CSV 及 STM32 测量链已移除；不解析或等待测量遥测。
+六路命令依旧为 43 字节有符号格式，通道对应物理 Pole `[1,3,5,4,6,2]`。
+STM32 保留 12 字节幅值回传；当前 GUI 不消费该回传，控制不依赖回传确认。
+MPC 10Hz / 执行 30Hz、三帧插值、限幅/斜率、FirstOrderESO、freshness、路径进度、
+串口故障锁存、IDLE heartbeat、急停及 STM32 300ms watchdog 均保留。
 
-- 接收不依赖相机、MPC 是否开始或当前 Tab；独立 15 ms RX QTimer 只读当前可用字节，
-  每次最多 1024 bytes，串口 `timeout=0`，不使用阻塞 readline。共享 ADCStreamDecoder
-  处理半帧、粘包、旧 12-byte echo、损坏帧和重新同步；没有第二个 RX reader。
-- 六行固定为 `a0/Pole1, a1/Pole3, a2/Pole5, a3/Pole4, a4/Pole6, a5/Pole2`，
-  每行显示当前 GUI command 和未标定 ADC raw，内部数组始终按 a0...a5，不按 Pole 重排。
-  GUI command 与 MCU 快照不严格同步；raw 不是 Ampere，也不是电气模型的 I_est。
-- 显示 frame_count、MCU timestamp_ms、UTC PC receive time、data age、valid/running、
-  error_flags、overrun_count、dma_error_count、dma_late_count，以及拒绝帧和 RX/parser 异常数。
-- LIVE 表示新鲜且 valid/running 为 1、error_flags 为 0；超过 500 ms 没有完整 ADC 帧为
-  STALE（连接后尚未收到帧也显示 STALE）；故障快照或 RX/parser 异常为 INVALID；
-  未连接为 DISCONNECTED。100 ms 显示定时器持续更新数据年龄，所有状态只影响监视。
-- “选择 CSV 路径 / 开始 ADC 记录 / 停止 ADC 记录”记录未来收到的完整快照，使用与 CLI
-  相同的 15 列 CSV（timestamp_pc、frame_count、timestamp_mcu、raw0...raw5、错误计数、
-  valid/running）。CSV 与 MPC 实验 CSV 分开，文件已存在时拒绝覆盖。
-- CSV 写盘使用独立线程和 256 行有界队列，RX 回调只做不等待的入队；写盘故障或队列满
-  会明确显示并停止记录，不影响 MPC 或串口发送。停止记录异步完成已接收行并关闭文件。
-- 断开停止 RX/ADC 记录并清除旧快照与半帧；重连开始新解码会话，不自动续记旧 CSV。
-  普通停止/急停只停止控制，已连接的 ADC 观察继续。退出先按原流程急停和关闭串口，
-  再最多等待 1 秒收尾 CSV；若存储设备长期挂起，该等待上限不代表文件已成功保存。
+“控制日志”页继续工作，100ms 状态定时器保留为 `control_log_status_timer`。
+新日志 schema_version=2：控制流 95 列，worker 流 56 列，删除 11 个测量字段；
+具体字段与历史兼容性见 [CONTROL_LOG.md](CONTROL_LOG.md)。用户设置文件不因清理重置。
 
-MPC、Kalman/ESO、Fz 减摩、六路逆解、R-L 电流模型、10/30 Hz 调度和发送函数保持。
-ADC raw 仅显示、监测和记录，尚未标定为 Ampere，不进入 MPC/PWM 反馈，不实现电流 PI。
-固件 ADC 500 Hz / telemetry 约 10 Hz 不变。GUI 软件已使用模拟串口验证；新 telemetry HEX
-仍待烧录后的实板 GUI 验证，本轮没有自动连接、驱动或烧录硬件。
-
-```powershell
-C:\Python314\python.exe -B -m pytest -q -p no:cacheprovider tests/test_gui_curt_telemetry.py tests/test_curt_telemetry.py
-```
-
-## 独立 CURT raw 串口工具（保留，2026-10-03）
-
-独立工具 `curt_telemetry.py` 接收新版固件的 10 Hz 遥测。ADC 内部仍为 500 Hz，
-工具只显示/记录未标定 raw，不做安培换算，也不参与 PI 或控制反馈。
-
-本项目当前解释器是 `C:\Python314\python.exe`，已补齐 PySide6 6.11.2 和
-pyserial 3.5。numpy、OpenCV、pip 版本保持原样。
-
-需要烧录时，以当前 authoritative HEX 及 SHA-256 为准（路径相对项目根目录）：
-
-- canonical HEX：`pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.hex`，46,798 bytes。
-- SHA-256：`88eccb1b3b96725f67b356748942b8552fbb9abff984bbeba82ec0e64c18ef8a`。
-
-烧录前核对所选 HEX 的 SHA；正式 firmware build / release 规则见
-[FIRMWARE_BUILD_SOP.md](../FIRMWARE_BUILD_SOP.md)。历史 artifacts 中的旧 HEX
-不能仅因文件名同为 `pwm_02.hex` 就直接用于烧录。
-
-关闭 GUI/串口助手对同一 COM 口的连接。在 `dipole-control` 目录运行：
-
-```powershell
-C:\Python314\python.exe -B -m serial.tools.list_ports
-C:\Python314\python.exe -B curt_telemetry.py --port COM4 --duration 30 --csv curt_raw.csv
-```
-
-COM4 是示例，请替换为当前实际端口；本轮开发环境未检测到 COM 口。默认模式只读，
-进入/退出均不发送控制命令。CSV 使用 UTC ISO 时间，逐帧刷新，拒绝覆盖已有文件。
-终端打印 raw、有效/运行状态、错误计数、估计采样频率、拒绝帧数；5 秒没有完整遥测时提示等待。
-
-固件帧格式（14 个十进制无符号字段，一行 CRLF）：
-
-```text
-@ADC,<frame_count>,<timestamp_ms>,<raw0>,<raw1>,<raw2>,<raw3>,<raw4>,<raw5>,<error_flags>,<overrun_count>,<dma_error_count>,<dma_late_count>,<valid>,<running>\r\n
-```
-
-`timestamp_ms` 是完整快照发布时间。`valid`/`running` 为 0 或 1；采样失败时仍发故障状态，
-raw 可保留最后一帧。采样频率用相邻快照的 frame_count 和 MCU 时间增量计算，不把
-10 Hz 的串口帧率当作 ADC 采样率。正常相邻遥测约增加 50 个 frame_count，总体约 500/s。
-解码器处理拆包、粘包、截断和前面无换行的旧 12 字节 echo；控制帧/未知前缀不会被解析为 ADC。
-
-如需同一端口上同时驱动和记录，可以显式指定原 43 字节 signed 命令。下例先发全零并记录
-2 秒基线，随后以 30 Hz 重发仅 a0 为 +05 的固定命令；10 秒到期或 Ctrl+C 时尝试发全零：
-
-```powershell
-C:\Python314\python.exe -B curt_telemetry.py --port COM4 --duration 10 --csv curt_a0.csv --command 'a0:+05,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00'
-```
-
-`--command` 是显式测试选项，数值单位是已有 PWM 命令；与 GUI 共用原协议，但由独立进程
-持有串口。不要同时用两个程序打开同一 COM 口。串口断开时全零发送可能失败，原固件没有新增
-通信超时停机机制。依次只改变 a1..a5 的非零槽位，确认主变化分别对应 raw[1]..raw[5]。
-逻辑到物理顺序仍为 `[Pole1, Pole3, Pole5, Pole4, Pole6, Pole2]`。
-
-独立 parser/记录器测试：
-
-```powershell
-C:\Python314\python.exe -B -m pytest -q -p no:cacheprovider tests/test_curt_telemetry.py
-```
-
-测试使用内存串口，不连接或驱动实际硬件。以下是 2026-10-03 的历史软件验证记录，
-当前主 GUI 集成验证以 PROJECT_MEMORY 最新阶段为准：原上位机测试的缺依赖项已全部解决；默认环境
-完整运行是 66/67，一个线程时序测试越限。仅在诊断子进程设
-`OPENBLAS_NUM_THREADS=1`、`OMP_NUM_THREADS=1` 后该组 18/18 通过，原配置和控制代码未改。
+正式 canonical HEX：`pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.hex`，
+36,321 bytes，SHA-256：`b3dd7100d8e1cc43e50c61b5761b73fe17f73cb529482e9cb445edce5268879e`。
+完整 Keil Rebuild、无测量链验收和冻结 SHA 比对通过；尚未烧录或实机验证。
+构建入口及输入一致性规则见 [FIRMWARE_BUILD_SOP.md](../FIRMWARE_BUILD_SOP.md)。
+历史 artifacts/ 和 csvvvv/ 保留，不能将旧测量版 HEX 作为当前控制版镜像。

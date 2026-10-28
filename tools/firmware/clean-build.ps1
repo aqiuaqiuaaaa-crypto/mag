@@ -6,6 +6,7 @@ param(
     [string]$UV4Path,
     [string]$FromElfPath,
     [string]$Python = 'python',
+    [string]$InputManifest,
     [switch]$DryRun
 )
 $ErrorActionPreference = 'Stop'
@@ -75,6 +76,36 @@ function Get-FileMetadata([string]$Path) {
 
 function Assert-FirmwareClean([string]$TrackedStatus) {
     if ($TrackedStatus) { throw 'Tracked firmware is dirty; refusing official release (no automatic commit/discard)' }
+}
+
+function Get-FirmwareInputs([string]$Workspace) {
+    $names = (Get-GitText $Workspace @('ls-files', '--cached', '--others', '--exclude-standard', '--', 'pwm_double20260926DC6output')) -split "`n"
+    $result = @{}
+    foreach ($name in ($names | Sort-Object -Unique)) {
+        if (-not $name) { continue }
+        $path = Assert-SafePath (Join-Path $Workspace $name) $Workspace
+        $result[$name] = if (Test-Path -LiteralPath $path -PathType Leaf) { (Get-FileMetadata $path).sha256 } else { 'ABSENT' }
+    }
+    return $result
+}
+
+function Assert-InputManifest([string]$Workspace, [string]$Path, [string]$Head, [string]$Status, $Inputs) {
+    # Explicit, hash-pinned worktree builds avoid requiring a commit or weakening
+    # the default dirty-source rejection. Bind deletions, new inputs and tools too.
+    $manifestPath = Assert-SafePath $Path (Join-Path $Workspace 'artifacts')
+    $record = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($record.git_head -ne $Head -or $record.firmware_status -cne $Status) { throw 'Input manifest HEAD/status mismatch' }
+    $properties = @($record.input_sha256.PSObject.Properties)
+    if ($properties.Count -ne $Inputs.Count) { throw 'Input manifest file set mismatch' }
+    foreach ($property in $properties) {
+        if (-not $Inputs.ContainsKey($property.Name) -or $Inputs[$property.Name] -cne $property.Value) {
+            throw "Input manifest hash mismatch: $($property.Name)"
+        }
+    }
+    foreach ($name in @('clean-build.ps1', 'verify_image.py')) {
+        $actual = (Get-FileMetadata (Join-Path $PSScriptRoot $name)).sha256
+        if ($record.tool_sha256.$name -cne $actual) { throw "Input manifest tool mismatch: $name" }
+    }
 }
 
 function Get-CleanupFiles($Info, [string]$Workspace, [string[]]$Tracked) {
@@ -152,19 +183,21 @@ if ((Get-GitText $workspaceDir @('rev-parse', '--show-toplevel')).Replace('/', '
 }
 $info = Get-CanonicalProject $workspaceDir (Join-Path $workspaceDir "$firmwareName\MDK-ARM\pwm_02.uvprojx")
 $trackedStatus = Get-GitText $workspaceDir @('status', '--porcelain', '--untracked-files=no')
-Assert-FirmwareClean (Get-GitText $workspaceDir @('status', '--porcelain', '--untracked-files=no', '--', $firmwareName))
+$firmwareStatus = Get-GitText $workspaceDir @('status', '--porcelain', '--untracked-files=all', '--', $firmwareName)
 $head = Get-GitText $workspaceDir @('rev-parse', 'HEAD')
 $tracked = (Get-GitText $workspaceDir @('ls-files')) -split "`n"
-$inputs = @{}
-foreach ($name in $tracked | Where-Object { $_.StartsWith($firmwareName + '/') }) {
-    $inputs[$name] = (Get-FileMetadata (Join-Path $workspaceDir $name)).sha256
+$inputs = Get-FirmwareInputs $workspaceDir
+if ($InputManifest) {
+    Assert-InputManifest $workspaceDir $InputManifest $head $firmwareStatus $inputs
+} else {
+    Assert-FirmwareClean $firmwareStatus
 }
 $cleanup = @(Get-CleanupFiles $info $workspaceDir $tracked)
 if (-not $ArtifactDirectory) { $ArtifactDirectory = Join-Path $workspaceDir ('artifacts\firmware-release-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff')) }
 $artifactDir = Assert-SafePath ([IO.Path]::GetFullPath($ArtifactDirectory)) (Join-Path $workspaceDir 'artifacts')
 if (Test-Path -LiteralPath $artifactDir) { throw 'Artifact directory already exists; do not overwrite evidence' }
 $preflight = [ordered]@{ git_head = $head; tracked_status = $trackedStatus; canonical = $info
-    preflight_utc = [DateTimeOffset]::UtcNow.ToString('o'); input_sha256 = $inputs
+    preflight_utc = [DateTimeOffset]::UtcNow.ToString('o'); input_sha256 = $inputs; input_manifest = $InputManifest
     old_images = @($info.images | Where-Object { Test-Path -LiteralPath $_ } | ForEach-Object { Get-FileMetadata $_ }) }
 if ($DryRun) {
     [ordered]@{ operation = 'DRY_RUN_NOT_A_RELEASE'; preflight = $preflight; cleanup_files = $cleanup
@@ -190,7 +223,8 @@ if ($LASTEXITCODE -ne 0) { throw 'Python unavailable; refuse cleanup' }
 New-Item -ItemType Directory -Path $artifactDir | Out-Null
 $manifest = [ordered]@{ status = 'FAIL'; build_kind = 'official_original_project'; git_head = $head
     project = $info.project; project_sha256 = $info.project_sha256; target = $info.target; mcu = $info.mcu
-    uv4 = $UV4Path; fromelf = $FromElfPath; tracked_status = $trackedStatus; canonical_hex = $info.images[0] }
+    uv4 = $UV4Path; fromelf = $FromElfPath; tracked_status = $trackedStatus; canonical_hex = $info.images[0]
+    input_manifest = $InputManifest; input_sha256 = $inputs }
 $logPath = Join-Path $info.output 'pwm_02.release-build.tmp'
 try {
     $preflight | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $artifactDir 'preflight.json') -Encoding UTF8
@@ -218,8 +252,14 @@ try {
     $verification = Get-Content -LiteralPath $verificationPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($verification.status -ne 'PASS') { throw 'Static verification is not PASS' }
     if ((Get-GitText $workspaceDir @('rev-parse', 'HEAD')) -ne $head) { throw 'Git HEAD changed during build' }
+    $afterInputs = Get-FirmwareInputs $workspaceDir
+    if ($afterInputs.Count -ne $inputs.Count) { throw 'Firmware input file set changed during build' }
     foreach ($name in $inputs.Keys) {
-        if ((Get-FileMetadata (Join-Path $workspaceDir $name)).sha256 -ne $inputs[$name]) { throw "Firmware input changed: $name" }
+        if ($afterInputs[$name] -cne $inputs[$name]) { throw "Firmware input changed: $name" }
+    }
+    if ($InputManifest) {
+        $afterStatus = Get-GitText $workspaceDir @('status', '--porcelain', '--untracked-files=all', '--', $firmwareName)
+        Assert-InputManifest $workspaceDir $InputManifest $head $afterStatus $afterInputs
     }
     # Freeze only after canonical verification. Never copy staging/artifacts into canonical.
     Copy-Item -LiteralPath $logPath -Destination (Join-Path $artifactDir 'build.log')

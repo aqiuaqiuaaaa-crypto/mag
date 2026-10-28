@@ -3,6 +3,10 @@
 本规范是以后选择正式可烧录固件的入口；历史日期目录中的 HARDWARE_SOP / README
 所列 artifacts HEX 只描述当时验证，不替代本规范。此流程只构建、核验与冻结，**不下载、不烧录**。
 
+2026-10-28 起正式目标是无 CURT/ADC 的控制固件。当前 canonical HEX 为36,321 bytes，
+SHA-256=`b3dd7100d8e1cc43e50c61b5761b73fe17f73cb529482e9cb445edce5268879e`。
+本轮原工程 Rebuild、静态验收和冻结一致性已完成；镜像尚未烧录。
+
 ## 两类 build
 
 - **Isolated validation**：tracked source → staging → Keil Rebuild → validation artifact。
@@ -55,8 +59,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/firmware/clean-build.p
 ## 顺序与硬门槛
 
 1. **Preflight**：记录 Git HEAD、tracked 状态、原 uvprojx 路径/SHA、target、MCU、
-   时间及全部 tracked firmware 输入 SHA。任何 staged/unstaged tracked firmware 修改都停止；
-   不提交、不丢弃修改。其他 tracked 文档/PC 修改只记录状态，不改变该 firmware 门槛。
+   时间及 firmware 输入 SHA（含删除路径和新增未跟踪输入）。默认遇到任何 staged/unstaged
+   或未跟踪 firmware 修改都停止；不提交、不丢弃修改。审查过的未提交工作树可显式使用下述
+   `-InputManifest`，逐项校验HEAD、完整status、输入集及SHA，禁止把该选项当成忽略dirty的开关。
+   其他 tracked 文档/PC 修改只记录状态，不改变该 firmware 门槛。
 2. **审计与 clean**：记录旧 HEX/AXF/MAP 的 size/mtime/SHA，归档将清理的旧 generated
    output。只清理 canonical output、MDK Objects/Listings 与 MDK listings 中已识别、
    未跟踪的生成文件；保留 tracked scatter/input。越界、junction/symlink、未知 output 文件停止。
@@ -67,10 +73,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/firmware/clean-build.p
    退出码0/1可接受，warnings完整记录；不为消警告修改控制逻辑。
 4. **Freshness**：三份 canonical 产物必须非空，mtime 在本次 start/finish UTC 窗口内。
    同时要求清理后“不存在”证据；mtime 新或 SHA 与过去相同都不能单独证明 fresh。
-5. **Canonical static verification**：复用 `verify_image.py` 的 2026-10-06 逻辑：Intel HEX
-   结构/校验、AXF PT_LOAD/HEX/fromelf BIN 加载字节一致、入口/vector、`@ADC`、
-   current_sense/uart_telemetry/ADC/TIM3/DMA IRQ/watchdog live symbols、main cross-references、
-   300ms比较及CTRL_SD shutdown/recovery代码。核验 canonical 文件，不先复制 staging 文件。
+5. **Canonical static verification**：`verify_image.py` 验证 Intel HEX结构/校验、
+   AXF PT_LOAD/HEX/fromelf BIN加载字节一致、入口/vector；拒绝`@ADC`、测量模块/状态、
+   ADC/TIM3初始化及采样实现。ADC_IRQHandler及DMA2_Stream0_IRQHandler仅允许来自startup默认
+   别名，不能仅按名称认定残留。继续检查六路PWM/协议/12字节回传/watchdog的live symbols、
+   main cross-references、300ms比较和CTRL_SD shutdown/recovery代码。
+   核验canonical文件，不先复制staging文件。
    fromelf BIN/反汇编仅是分析证据；单独运行 verifier PASS **不等于 release PASS**。
 6. **Freeze**：static PASS 后，再检查 HEAD/firmware 输入 SHA 未变。
    从 **canonical → 新 artifacts 目录**复制 HEX/AXF/MAP 和完整 build.log，保留预检、
@@ -88,6 +96,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools/firmware/clean-build.p
 这里的 burnable 表示构建来源和镜像一致性，不代表硬件功能已验证，也不授权自动烧录。
 
 ## 产物、测试与历史边界
+
+### 显式审查未提交输入
+
+当任务禁止创建提交时，可以先保存并审查输入清单，再显式传入 `-InputManifest`。
+清单必须位于本工作区 artifacts/ 内，包含 `git_head`、完整 `firmware_status`、
+`input_sha256`（已删除路径值为 `ABSENT`，新增文件也必须列入）、`tool_sha256`
+（clean-build.ps1及verify_image.py）。构建前后均拒绝文件集、状态、内容或工具SHA漂移。
+HEAD只表示基线；实际构建的是清单中绑定的工作树，不能声称输入已提交。
+本轮已审查清单为 `artifacts/curt-removal-20261028/reviewed-inputs.json`。
+后续源文件改变后必须重新生成并核对清单，不允许直接复用旧清单。
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File tools/firmware/clean-build.ps1 -InputManifest artifacts/curt-removal-20261028/reviewed-inputs.json
+python tools/firmware/test_verify_image.py
+```
+
+`test_clean_build.ps1` 保留默认dirty拒绝、canonical路径、clean/fresh/hash保护，并覆盖
+显式清单的HEAD/status、文件集、源码SHA及工具SHA篡改拒绝。
+`test_verify_image.py` 覆盖startup别名允许、强采样IRQ拒绝、采样模块/状态/初始化残留拒绝。
 
 默认新目录为 `artifacts/firmware-release-<timestamp>/`，保存 HEX/AXF/MAP、build.log、
 preflight.json、static-verification.json/fromelf分析数据、manifest.json、SHA256.txt和old-output。

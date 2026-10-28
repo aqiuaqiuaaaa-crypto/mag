@@ -22,7 +22,6 @@
 #include "stm32f4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "adc.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -259,13 +258,4 @@ void DMA2_Stream7_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-void DMA2_Stream0_IRQHandler(void)
-{
-  HAL_DMA_IRQHandler(&hdma_adc1);
-}
-
-void ADC_IRQHandler(void)
-{
-  HAL_ADC_IRQHandler(&hadc1);
-}
 /* USER CODE END 1 */

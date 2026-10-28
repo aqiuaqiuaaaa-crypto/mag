@@ -11,7 +11,9 @@ typedef struct {
 } TIM_TypeDef;
 typedef struct { TIM_TypeDef *Instance; } TIM_HandleTypeDef;
 typedef struct { uint32_t unused; } DMA_HandleTypeDef;
-typedef struct { DMA_HandleTypeDef *hdmarx; } UART_HandleTypeDef;
+typedef struct { DMA_HandleTypeDef *hdmarx; uint32_t gState; } UART_HandleTypeDef;
+#define HAL_UART_STATE_READY 0U
+#define HAL_UART_STATE_BUSY_TX 1U
 
 extern GPIO_TypeDef test_gpiof;
 extern TIM_TypeDef test_tim1, test_tim2, test_tim8;
@@ -53,7 +55,5 @@ void test_disable_dma_it(DMA_HandleTypeDef *dma, uint32_t interrupt);
 #define __HAL_DMA_DISABLE_IT(dma, interrupt) test_disable_dma_it(dma, interrupt)
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *timer);
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *uart, uint16_t size);
-HAL_StatusTypeDef CurrentSense_Start(void);
-void UARTTelemetry_QueueEcho(const uint8_t *data, uint16_t size);
-void UARTTelemetry_Poll(void);
+HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size);
 #endif

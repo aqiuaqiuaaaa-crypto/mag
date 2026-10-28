@@ -1,6 +1,6 @@
 """Opt-in control diagnostics: immutable rows, bounded queue, one disk thread.
 
-Blank CSV cells mean unavailable/not executed this tick. ADC values are raw counts.
+Blank CSV cells mean unavailable/not executed this tick.
 All force columns use micro-newtons, B columns tesla, current columns amperes,
 positions millimetres and velocities millimetres/second. No control calculation
 or feedback lives here. A session creates four NEW files and never overwrites.
@@ -99,12 +99,6 @@ CONTROL_FIELDS = (
     "B_mag_mT",
     "align_ratio",
     "low_field",
-    "adc_frame_count",
-    "adc_age_ms",
-    *(f"raw{i}" for i in range(6)),
-    "adc_valid",
-    "adc_running",
-    "adc_error_flags",
 )
 WORKER_FIELDS = (
     "t_mono",
@@ -339,7 +333,7 @@ class ControlLogger:
                 metadata = {
                     **self._metadata,
                     **self._git_metadata(),
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "queue_capacity": self._queue.maxsize,
                     "control_fields": CONTROL_FIELDS,
                     "worker_fields": WORKER_FIELDS,

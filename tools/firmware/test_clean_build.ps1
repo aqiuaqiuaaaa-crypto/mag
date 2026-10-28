@@ -39,6 +39,41 @@ Test-Case 'unsafe cleanup path is rejected' {
     Expect-Failure { Clear-GeneratedOutput $info @((Join-Path $fixtureRoot 'outside-output.hex')) }
 }
 $scatter = Join-Path $output 'pwm_02.sct'
+$manifestPath = Join-Path $fixtureRoot 'reviewed-inputs.json'
+$manifestHead = Get-GitText $workspaceDir @('rev-parse', 'HEAD')
+$manifestStatus = Get-GitText $workspaceDir @('status', '--porcelain', '--untracked-files=all', '--', 'pwm_double20260926DC6output')
+$manifestInputs = Get-FirmwareInputs $workspaceDir
+$manifestRecord = [ordered]@{ git_head = $manifestHead; firmware_status = $manifestStatus
+    input_sha256 = $manifestInputs; tool_sha256 = @{} }
+foreach ($name in @('clean-build.ps1', 'verify_image.py')) {
+    $manifestRecord.tool_sha256[$name] = (Get-FileMetadata (Join-Path $PSScriptRoot $name)).sha256
+}
+function Write-TestManifest { $manifestRecord | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $manifestPath -Encoding UTF8 }
+Write-TestManifest
+Test-Case 'explicit pinned worktree manifest accepts exact reviewed inputs' {
+    Assert-InputManifest $workspaceDir $manifestPath $manifestHead $manifestStatus $manifestInputs
+}
+Test-Case 'manifest rejects changed HEAD and firmware status' {
+    Expect-Failure { Assert-InputManifest $workspaceDir $manifestPath ('0' * 40) $manifestStatus $manifestInputs }
+    Expect-Failure { Assert-InputManifest $workspaceDir $manifestPath $manifestHead 'different status' $manifestInputs }
+}
+Test-Case 'manifest rejects source byte changes and additional inputs' {
+    $changed = $manifestInputs.Clone()
+    $key = @($changed.Keys)[0]
+    $changed[$key] = 'different source'
+    Expect-Failure { Assert-InputManifest $workspaceDir $manifestPath $manifestHead $manifestStatus $changed }
+    $changed = $manifestInputs.Clone()
+    $changed['new source'] = 'new hash'
+    Expect-Failure { Assert-InputManifest $workspaceDir $manifestPath $manifestHead $manifestStatus $changed }
+}
+Test-Case 'manifest rejects changed verifier/build script' {
+    $old = $manifestRecord.tool_sha256['verify_image.py']
+    $manifestRecord.tool_sha256['verify_image.py'] = 'different tool'
+    Write-TestManifest
+    Expect-Failure { Assert-InputManifest $workspaceDir $manifestPath $manifestHead $manifestStatus $manifestInputs }
+    $manifestRecord.tool_sha256['verify_image.py'] = $old
+    Write-TestManifest
+}
 Set-Content -LiteralPath $scatter 'preserved tracked input' -Encoding ASCII
 foreach ($path in $info.images) { Set-Content -LiteralPath $path 'stale output' -Encoding ASCII }
 $trackedScatter = 'pwm_double20260926DC6output/MDK-ARM/pwm_02/pwm_02.sct'
@@ -105,7 +140,7 @@ Test-Case 'original workspace dry-run preserves canonical images and staged diff
         if (Test-Path -LiteralPath $_) { Get-FileMetadata $_ } else { @{ path = $_; absent = $true } }
     })
     $indexBefore = Get-GitText $workspaceDir @('diff', '--cached')
-    $json = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'clean-build.ps1') -DryRun
+    $json = & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'clean-build.ps1') -DryRun -InputManifest $manifestPath
     Check ($LASTEXITCODE -eq 0) 'Dry-run failed'
     $plan = $json -join "`n" | ConvertFrom-Json
     Check ($plan.operation -eq 'DRY_RUN_NOT_A_RELEASE' -and $plan.build_source -eq $canonical.project) 'Invalid dry-run provenance'

@@ -16,7 +16,9 @@ UART_HandleTypeDef huart1;
 static DMA_HandleTypeDef rx_dma;
 static uint32_t tick, primask, sub_us, pwm_us, update_us;
 static uint32_t active[6], main_channels[2], n_channels[2];
-static uint32_t gpio_sets, gpio_resets, echoes, telemetry_polls, rx_rearms;
+static uint32_t gpio_sets, gpio_resets, echoes, rx_rearms;
+static uint8_t hold_echo_dma;
+static uint8_t *dma_echo_pointer;
 static uint64_t real_us, recovery_real_us;
 static uint8_t tim2_running, enforce_zero_enable, overwrite_after_snapshot;
 static uint8_t advance_tick_during_restore;
@@ -147,12 +149,17 @@ void test_disable_dma_it(DMA_HandleTypeDef *dma, uint32_t interrupt)
 {
   assert(dma == &rx_dma && interrupt == DMA_IT_HT);
 }
-HAL_StatusTypeDef CurrentSense_Start(void) { return HAL_OK; }
-void UARTTelemetry_QueueEcho(const uint8_t *data, uint16_t size)
+HAL_StatusTypeDef HAL_UART_Transmit_DMA(UART_HandleTypeDef *uart, uint8_t *data, uint16_t size)
 {
+  assert(uart == &huart1 && uart->gState == HAL_UART_STATE_READY);
+#ifndef BASELINE
+  assert(primask == 1U); /* RX rearm shares the HAL UART lock with TX setup. */
+#endif
   assert(size == 12U); memcpy(captured_echo, data, size); ++echoes;
+  dma_echo_pointer = data;
+  if (hold_echo_dma) uart->gState = HAL_UART_STATE_BUSY_TX;
+  return HAL_OK;
 }
-void UARTTelemetry_Poll(void) { ++telemetry_polls; }
 
 static void advance_us(uint32_t duration, uint8_t poll)
 {
@@ -477,8 +484,25 @@ static void test_case(const char *kind)
     advance_ms(1U); assert_outputs(nonzero); assert(!watchdog_timeout_latched);
     /* Preserve original >=43 prefix acceptance; do not alter UART framing. */
   }
+  else if (strcmp(kind, "echo-busy") == 0)
+  {
+    uint32_t submitted;
+    hold_echo_dma = 1U;
+    send_values(nonzero);
+    submitted = echoes;
+    assert(huart1.gState == HAL_UART_STATE_BUSY_TX);
+    send_values(next_command);
+    advance_ms(1U);
+    assert_outputs(next_command); /* Busy echo must never block control. */
+    assert(echoes == submitted);
+    assert(memcmp(dma_echo_pointer, captured_echo, 12U) == 0);
+    huart1.gState = HAL_UART_STATE_READY;
+    send_values(next_command);
+    assert(echoes == submitted + 1U);
+    assert(memcmp(captured_echo, "999901015050", 12U) == 0);
+  }
   else test_invalid(kind);
-  assert(primask == 0U && telemetry_polls > 0U);
+  assert(primask == 0U);
   puts("production command watchdog scenario PASS");
 }
 #endif
@@ -497,9 +521,11 @@ static void trace(void)
       assert_outputs(target); commands(actual); compare_values(ccr);
       printf("%u %u", tick, (unsigned)test_gpiof.ODR);
       for (i = 0; i < 6; ++i) printf(" %d %u %u", actual[i], ccr[i], active[i]);
-      printf(" %u %u %u %u %u\n", (unsigned)main_channels[0],
+      printf(" %u %u %u %u %u", (unsigned)main_channels[0],
              (unsigned)main_channels[1], (unsigned)n_channels[0],
              (unsigned)n_channels[1], (unsigned)echoes);
+      for (i = 0; i < 12; ++i) printf(" %02x", captured_echo[i]);
+      printf("\n");
     }
 }
 

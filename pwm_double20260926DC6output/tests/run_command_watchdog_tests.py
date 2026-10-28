@@ -6,11 +6,13 @@ The model distinguishes readable CCR preloads from active PWM compare values.
 """
 
 import argparse
+import hashlib
+import json
 import subprocess
 import tempfile
 from pathlib import Path
 
-from test_adc_infrastructure import c_function
+from c_source import c_function
 
 ROOT = Path(__file__).resolve().parents[1]
 FUNCTIONS = [
@@ -58,6 +60,7 @@ CASES = [
     "primask",
     "foreign-callbacks",
     "trailing-data",
+    "echo-busy",
     "trace",
 ]
 
@@ -153,6 +156,15 @@ def main() -> None:
             elif case != "trace":
                 print(result.stdout.decode("ascii"), end="", flush=True)
             print("PASS: " + case, flush=True)
+            if case == "trace" and not baseline:
+                expected = json.loads(
+                    (ROOT / "tests/signed_control_trace.json").read_text()
+                )
+                canonical = b"\n".join(result.stdout.splitlines()) + b"\n"
+                assert len(result.stdout.splitlines()) == expected["frames"]
+                assert (
+                    hashlib.sha256(canonical).hexdigest() == expected["sha256_lf"]
+                ), "Signed PWM/echo trace changed"
     print(f"{len(cases)}/{len(cases)} production control scenarios PASS")
 
 

@@ -14,9 +14,9 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as cfg
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
 import multirate
-import test_gui_curt_telemetry as telemetry_tests
 import test_gui_freshness as freshness_tests
 import test_gui_path_progress as progress_tests
 from dipole_solver import DipoleSolver
@@ -27,18 +27,18 @@ from test_gui_control_log import finish_log, rows, start_log
 from test_l0_checkpoint_replay import exact, replay_checkpoint
 from test_target_box import frame_commands
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 
 def prepare(
     widget: gui.MagneticDipoleControl, mode: str, limit: int = 99
-) -> tuple[FakeClock, SharedState, CurrentExecutor, telemetry_tests.MemorySerial]:
+) -> tuple[FakeClock, SharedState, CurrentExecutor, gui_tests.MemorySerial]:
     clock = FakeClock()
     shared = SharedState(clock=clock)
     executor = CurrentExecutor(clock=clock, interpolation_mode=mode)
-    port = telemetry_tests.MemorySerial()
+    port = gui_tests.MemorySerial()
     widget.ser = port
     widget.last_sent_cmd = [0] * 6
     widget.spin_cmd_max.setValue(limit)
@@ -51,7 +51,7 @@ def frame(
     widget: gui.MagneticDipoleControl,
     shared: SharedState,
     executor: CurrentExecutor,
-    port: telemetry_tests.MemorySerial,
+    port: gui_tests.MemorySerial,
     limit: int = 99,
 ) -> dict[str, Any]:
     previous = list(widget.last_sent_cmd)

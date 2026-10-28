@@ -14,17 +14,17 @@ from numpy.typing import NDArray
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as cfg
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
+from gui_test_support import MemorySerial
 from multirate import ControlWorker
 from test_frames import TRANSFORMS
 from test_gui_control_log import configure_camera
-from test_gui_curt_telemetry import MemorySerial
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 Matrix = NDArray[np.float64]
 
 

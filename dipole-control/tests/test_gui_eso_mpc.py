@@ -11,16 +11,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from control_mode_simulation import MODES, configure_mode
 from estimators import ESO1D, FirstOrderESO
 from test_gui_control_log import finish_log, rows, start_log
 from test_gui_freshness import start_tracking
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 
 def test_new_default_and_persistence(window: gui.MagneticDipoleControl) -> None:
@@ -43,7 +43,9 @@ def test_existing_saved_settings_use_new_default_when_modes_absent(
     settings = json.loads(
         (Path(gui.__file__).parent / "gui_settings.json").read_text(encoding="utf8")
     )
-    assert "eso_mode" not in settings and "mpc_effort_mode" not in settings
+    # Exercise legacy settings independently of the user's saved mode choices.
+    settings.pop("eso_mode", None)
+    settings.pop("mpc_effort_mode", None)
     Path(gui.SETTINGS_FILE).write_text(json.dumps(settings), encoding="utf8")
     window.load_settings()
     window._sync_physics_from_ui()

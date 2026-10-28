@@ -44,7 +44,6 @@ def test_round_trip_immutable_and_stop(tmp_path: Path) -> None:
             "mode": "AUTO_TRACK",
             "tracking": True,
             "cmd_sent_a0": -9,
-            "raw0": 4095,
             "F_target_x": 0.125,
         }
         assert sink.enqueue("control", values)
@@ -56,13 +55,13 @@ def test_round_trip_immutable_and_stop(tmp_path: Path) -> None:
     assert [int(row["tick"]) for row in rows] == list(range(30))
     timestamps = [float(row["t_mono"]) for row in rows]
     assert all(b > a for a, b in pairwise(timestamps))
-    assert all(row["tracking"] == "True" and int(row["raw0"]) == 4095 for row in rows)
+    assert all(row["tracking"] == "True" for row in rows)
     assert all(
         float(row["F_target_x"]) == 0.125 and row["meas_x_mm"] == "" for row in rows
     )
     assert tuple(read_rows(sink.worker_path)[0]) == WORKER_FIELDS
     meta = json.loads(sink.metadata_path.read_text(encoding="utf8"))
-    assert meta["schema_version"] == 1 and meta["offset"] == [0] * 6
+    assert meta["schema_version"] == 2 and meta["offset"] == [0] * 6
     assert len(meta["git_commit"]) == 40
     summary = json.loads(sink.summary_path.read_text(encoding="utf8"))
     assert summary["stats"]["control"] == {

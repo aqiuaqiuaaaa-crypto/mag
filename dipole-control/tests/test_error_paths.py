@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import bead_sim_gui as sim_gui
 import magnetic_dipole_pid as gui
+from gui_test_support import MemorySerial
 from PySide6.QtWidgets import QApplication
-from test_gui_curt_telemetry import MemorySerial
 
 
 @pytest.fixture(scope="session")
@@ -168,7 +168,7 @@ def test_connect_expected_failure_is_reported(
     window.combo_port.addItem("MOCK")
     monkeypatch.setattr(gui, "_serial", SimpleNamespace(Serial=fail))
     window.toggle_serial()
-    assert window.ser is None and not window.adc_rx_timer.isActive()
+    assert window.ser is None
     assert messages and "打开失败" in messages[-1]
 
 
@@ -185,7 +185,7 @@ def test_connect_initial_write_failure_cleans_up(
     monkeypatch.setattr(gui, "_serial", SimpleNamespace(Serial=lambda *a, **k: port))
     window.toggle_serial()
     assert port.close_attempted and window.ser is None
-    assert not window.adc_rx_timer.isActive()
+    assert window.ser is None
     assert window.serial_fault and window.mode == "SERIAL_FAULT"
 
 

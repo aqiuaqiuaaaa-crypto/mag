@@ -13,14 +13,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
+from gui_test_support import MemorySerial, connect
 from test_gui_control_log import configure_camera
-from test_gui_curt_telemetry import MemorySerial, adc_frame, connect
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 ACTIVE_MODES = (
     "tracking",
@@ -285,7 +285,7 @@ def test_stopping_twice_preserves_records_and_manual_setpoints(
     assert window.last_sent_cmd == [0] * 6 and window.mode == "IDLE"
 
 
-def test_stop_keeps_existing_adc_monitor_and_log_fields(
+def test_stop_keeps_control_log_and_serial_lifecycle(
     window: gui.MagneticDipoleControl,
     ports: list[MemorySerial],
     clock: list[float],
@@ -303,12 +303,9 @@ def test_stop_keeps_existing_adc_monitor_and_log_fields(
     sink = window.control_logger
     assert sink is not None
     window.emergency_stop()
-    port.incoming.extend(adc_frame(88))
-    window.poll_serial_rx()
     advance(window, clock, 30)
-    assert window.adc_rx_timer.isActive() and window.adc_status_timer.isActive()
-    assert window.ser is port and window.adc_snapshot is not None
-    assert window.adc_snapshot.frame_count == 88
+    assert window.control_log_status_timer.isActive()
+    assert window.ser is port and not port.closed
     window.stop_control_log()
     assert sink.wait_closed(3) and sink.error is None
     with sink.path.open(newline="", encoding="utf8") as file:
@@ -316,7 +313,7 @@ def test_stop_keeps_existing_adc_monitor_and_log_fields(
     assert len(records) == 30
     assert all(row["mode"] == "IDLE" and row["tracking"] == "False" for row in records)
     assert all(row[f"cmd_sent_a{i}"] == "0" for row in records for i in range(6))
-    assert all(row["raw5"] == "606" for row in records)
+    assert not any(key.startswith(("adc_", "raw")) for key in records[0])
 
 
 @pytest.mark.parametrize("stop_name", ["normal_stop", "emergency_stop"])

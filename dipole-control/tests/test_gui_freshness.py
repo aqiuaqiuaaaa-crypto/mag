@@ -10,16 +10,16 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
+from gui_test_support import MemorySerial
 from multirate import ControlWorker, CurrentExecutor, SharedState
 from test_freshness import FakeClock
 from test_gui_control_log import configure_camera, finish_log, rows, start_log
-from test_gui_curt_telemetry import MemorySerial
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 
 def start_tracking(

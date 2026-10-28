@@ -9,15 +9,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from control_mode_simulation import SCENARIOS, run_simulation
 from interpolation_analysis import MODES, evidence, simulation_metrics
 from multirate import ControlWorker
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 CASES = [*SCENARIOS, "nominal_no_noise", "vision_gap", "corner_reversal_finish"]
 
 

@@ -21,7 +21,6 @@
 #include "tim.h"
 
 /* USER CODE BEGIN 0 */
-TIM_HandleTypeDef htim3;
 /* USER CODE END 0 */
 
 TIM_HandleTypeDef htim1;
@@ -382,27 +381,4 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* tim_baseHandle)
 }
 
 /* USER CODE BEGIN 1 */
-/* Independent sampling clock only; no output GPIO or TIM3 interrupt. */
-HAL_StatusTypeDef MX_TIM3_Init(void)
-{
-  TIM_ClockConfigTypeDef clock = {0};
-  TIM_MasterConfigTypeDef master = {0};
-  HAL_StatusTypeDef status;
-  __HAL_RCC_TIM3_CLK_ENABLE();
-  htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 839;
-  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 199;
-  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
-  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
-  status = HAL_TIM_Base_Init(&htim3);
-  if (status != HAL_OK) return status;
-  clock.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
-  status = HAL_TIM_ConfigClockSource(&htim3, &clock);
-  if (status != HAL_OK) return status;
-  /* APB1 timer clock 84 MHz / 840 / 200 = 500 complete scans/s. */
-  master.MasterOutputTrigger = TIM_TRGO_UPDATE;
-  master.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
-  return HAL_TIMEx_MasterConfigSynchronization(&htim3, &master);
-}
 /* USER CODE END 1 */

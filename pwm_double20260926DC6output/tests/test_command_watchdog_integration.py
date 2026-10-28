@@ -5,7 +5,7 @@ import re
 import unittest
 from pathlib import Path
 
-from test_adc_infrastructure import c_function
+from c_source import c_function
 from watchdog_main_patch import restore
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -132,15 +132,17 @@ class CommandWatchdogIntegrationTests(unittest.TestCase):
             c_function(data, "PARSE_SIGNED"), c_function(restore(data), "PARSE_SIGNED")
         )
 
-    def test_telemetry_and_acquisition_have_no_watchdog_dependency(self):
+    def test_measurement_removed_and_echo_has_exclusive_dma_buffer(self):
         for name in ("adc", "current_sense", "uart_telemetry"):
-            data = (ROOT / f"Core/Src/{name}.c").read_bytes()
-            self.assertNotRegex(
-                data, rb"watchdog|CMD_TIMEOUT|driver_shutdown|driver_enable"
-            )
+            self.assertFalse((ROOT / f"Core/Src/{name}.c").exists())
         data = (ROOT / "Core/Src/main.c").read_bytes()
-        self.assertEqual(len(re.findall(rb"UARTTelemetry_Poll\(\);", data)), 1)
-        self.assertNotIn(b"@ADC", data)
+        self.assertNotRegex(data, rb"@ADC|CurrentSense|UARTTelemetry")
+        self.assertIn(b"static uint8_t tx_buf[16]", data)
+        self.assertLess(
+            data.index(b"if (huart1.gState == HAL_UART_STATE_READY)"),
+            data.index(b"tx_buf[0]  ="),
+        )
+        self.assertEqual(data.count(b"HAL_UART_Transmit_DMA("), 1)
 
 
 if __name__ == "__main__":

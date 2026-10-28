@@ -11,14 +11,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from control_mode_simulation import MODES, SCENARIOS, run_simulation
 from multirate import ControlWorker
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 
 @pytest.mark.parametrize("scenario", SCENARIOS)

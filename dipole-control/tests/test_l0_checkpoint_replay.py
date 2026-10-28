@@ -23,19 +23,19 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as current
 import multirate as current_multi
-import test_gui_curt_telemetry as telemetry_tests
 from control_mode_simulation import configure_mode
+from gui_test_support import MemorySerial
 from PySide6.QtWidgets import QApplication, QMessageBox
 from test_gui_control_log import configure_camera
-from test_gui_curt_telemetry import MemorySerial
 from test_serial_safety import request_mode
 from test_stop_modes import ACTIVE_MODES
 
 BASE = "8549352e492e4d9cde2cc4142001fcada7ff994a"
 ROOT = Path(__file__).resolve().parents[2]
-app = telemetry_tests.app
+app = gui_tests.app
 
 
 def exact(left: Any, right: Any, path: str) -> None:
@@ -61,6 +61,11 @@ def load_parent(
 ) -> dict[str, ModuleType]:
     loaded: dict[str, ModuleType] = {}
     for name in (
+        # Only the historical GUI needs these removed modules. Load its exact
+        # pinned dependencies inside the temporary import map; production never
+        # imports or restores the old measurement feature.
+        "curt_telemetry",
+        "adc_csv",
         "config",
         "dipole_solver",
         "estimators",
@@ -228,7 +233,12 @@ def replay_checkpoint(
                     with patch.object(time, "time", lambda clock=clock: clock[0]):
                         for i, (window, port) in enumerate(zip(windows, ports)):
                             window.timer.stop()
-                            window.adc_status_timer.stop()
+                            status_timer = getattr(
+                                window, "control_log_status_timer", None
+                            )
+                            if status_timer is None:  # Historical checkpoint only.
+                                status_timer = window.adc_status_timer
+                            status_timer.stop()
                             window.control_clock = lambda clock=clock: clock[0]
                             multi = old_multi if i == 0 else current
                             window.shared = multi.SharedState(

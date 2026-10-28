@@ -183,6 +183,55 @@ def require(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def verify_no_measurement(
+    map_text: str, linked: dict[str, dict[str, Any]]
+) -> dict[str, str]:
+    """Reject real sampling code; allow only startup-owned default IRQ aliases.
+
+    The MAP includes object provenance and live cross references. A generic
+    vector-table name alone does not establish an active peripheral handler.
+    """
+    require(
+        re.search(
+            r"\b(?:adc|current_sense|uart_telemetry|stm32f4xx_hal_adc(?:_ex)?)\.o\b",
+            map_text,
+            re.IGNORECASE,
+        )
+        is None,
+        "CURT/ADC object remains in MAP",
+    )
+    for name in linked:
+        require(
+            re.match(
+                r"(?:CurrentSense_|UARTTelemetry_|HAL_ADC|MX_ADC|MX_TIM3_Init$|FormatSnapshot$)",
+                name,
+            )
+            is None,
+            f"Measurement implementation remains: {name}",
+        )
+    require(
+        re.search(
+            r"^\s*(?:hadc1|hdma_adc1|htim3|latest_snapshot|pending_echo)\s+0x",
+            map_text,
+            re.MULTILINE,
+        )
+        is None,
+        "Measurement state remains in MAP",
+    )
+    handlers = {}
+    for name in ("ADC_IRQHandler", "DMA2_Stream0_IRQHandler"):
+        item = linked.get(name)
+        require(item is not None, f"Missing startup vector alias: {name}")
+        assert item is not None
+        owner = str(item["object"])
+        require(
+            owner.startswith("startup_stm32f407xx.o("),
+            f"Active sampling IRQ remains: {name}",
+        )
+        handlers[name] = owner
+    return handlers
+
+
 def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str, Any]:
     memory, hex_info = intel_hex(output / "pwm_02.hex")
     load, axf_info = elf_load(output / "pwm_02.axf")
@@ -191,7 +240,7 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
     require(
         binary == bytes(memory[address] for address in sorted(memory)), "HEX/BIN differ"
     )
-    require(bool(hex_info["adc_marker_addresses"]), "Missing @ADC in final image")
+    require(not hex_info["adc_marker_addresses"], "Unexpected @ADC in final image")
     stack, reset = struct.unpack_from("<II", binary)
     require(0x20000000 <= stack <= 0x20020000, "Invalid vector stack")
     require(bool(reset & 1) and (reset & ~1) in memory, "Invalid reset vector")
@@ -206,17 +255,17 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
         "clear_command_outputs",
         "driver_shutdown_all",
         "driver_enable_all",
-        "CurrentSense_Start",
-        "CurrentSense_GetSnapshot",
-        "UARTTelemetry_Poll",
-        "UARTTelemetry_QueueEcho",
-        "FormatSnapshot",
-        "MX_ADC1_Init",
-        "MX_TIM3_Init",
-        "DMA2_Stream0_IRQHandler",
-        "HAL_ADC_ConvCpltCallback",
-        "HAL_ADC_ConvHalfCpltCallback",
-        "HAL_ADC_ErrorCallback",
+        "Check_Frame",
+        "PARSE_SIGNED",
+        "Start_PWM",
+        "Stop_PWM",
+        "HAL_TIM_PeriodElapsedCallback",
+        "HAL_UARTEx_RxEventCallback",
+        "HAL_UART_Transmit_DMA",
+        "MX_TIM1_Init",
+        "MX_TIM2_Init",
+        "MX_TIM8_Init",
+        "MX_USART1_UART_Init",
     )
     for name in required:
         require(name in linked, f"Missing linked symbol: {name}")
@@ -234,6 +283,7 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
             ),
             f"Dead-stripped symbol: {name}",
         )
+    default_irqs = verify_no_measurement(map_text, linked)
     for name in (
         "last_valid_cmd_tick",
         "watchdog_timeout_latched",
@@ -249,9 +299,10 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
             f"Missing watchdog state: {name}",
         )
     for reference in (
-        "main.o(i.main) refers to current_sense.o(i.CurrentSense_Start)",
-        "main.o(i.main) refers to uart_telemetry.o(i.UARTTelemetry_Poll)",
         "main.o(i.main) refers to main.o(i.command_watchdog_poll)",
+        "main.o(i.main) refers to stm32f4xx_hal_uart.o(i.HAL_UART_Transmit_DMA)",
+        "main.o(i.main) refers to main.o(i.Check_Frame)",
+        "main.o(i.main) refers to main.o(i.PARSE_SIGNED)",
     ):
         require(reference in map_text, f"Missing main cross-reference: {reference}")
     disasm = disassembly_path.read_text(encoding="utf8", errors="replace")
@@ -259,7 +310,6 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
     commit = disassembly_function(disasm, "commit_command")
     shutdown = disassembly_function(disasm, "driver_shutdown_all")
     enable = disassembly_function(disasm, "driver_enable_all")
-    formatter = disassembly_function(disasm, "FormatSnapshot")
     require(bool(re.search(r"CMP\s+\w+,#0x12c", poll)), "Missing 300ms comparison")
     require(
         "BL       driver_shutdown_all" in poll
@@ -285,10 +335,8 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
         "Missing CTRL_SD GPIO",
     )
     require(
-        "MOVS     r2,#0" in shutdown
-        and "MOVS     r2,#1" in enable
-        and "@ADC" in formatter,
-        "Missing GPIO levels/telemetry",
+        "MOVS     r2,#0" in shutdown and "MOVS     r2,#1" in enable,
+        "Missing GPIO levels",
     )
     return {
         "status": "PASS",
@@ -302,6 +350,9 @@ def verify(output: Path, binary_path: Path, disassembly_path: Path) -> dict[str,
         "linked_symbols": {name: linked[name] for name in required},
         "watchdog_300ms_shutdown_recovery": True,
         "ctrl_sd": True,
+        "measurement_absent": True,
+        "default_sampling_irq_aliases": default_irqs,
+        "protocol_pwm_echo_linked": True,
     }
 
 

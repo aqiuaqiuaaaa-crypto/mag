@@ -19,8 +19,6 @@
 /* USER CODE BEGIN Includes */
 
 #include "string.h"
-#include "current_sense.h"
-#include "uart_telemetry.h"
 #include "../SYSTEM/delay/delay.h"
 #include "../BSP/EXTI/exti.h"
 #include "../BSP/LED/led.h"
@@ -471,9 +469,6 @@ int main(void)
   /* TIM2周期 */
   TIM2->ARR = 41999;
 
-  /* Measurement-only ADC path; failures do not change PWM. */
-  (void)CurrentSense_Start();
-
   /*
    * 启动UART DMA + IDLE接收
    */
@@ -627,35 +622,46 @@ int main(void)
                  * 后面可以改成18字节有符号回传。
                  */
 
-                tx_buf[0]  = frame[4];
-                tx_buf[1]  = frame[5];
+                /* Keep the DMA-owned echo buffer unchanged while TX is busy. */
+                if (huart1.gState == HAL_UART_STATE_READY)
+                {
+                    uint32_t echo_primask;
+                    tx_buf[0]  = frame[4];
+                    tx_buf[1]  = frame[5];
 
-                tx_buf[2]  = frame[11];
-                tx_buf[3]  = frame[12];
+                    tx_buf[2]  = frame[11];
+                    tx_buf[3]  = frame[12];
 
-                tx_buf[4]  = frame[18];
-                tx_buf[5]  = frame[19];
+                    tx_buf[4]  = frame[18];
+                    tx_buf[5]  = frame[19];
 
-                tx_buf[6]  = frame[25];
-                tx_buf[7]  = frame[26];
+                    tx_buf[6]  = frame[25];
+                    tx_buf[7]  = frame[26];
 
-                tx_buf[8]  = frame[32];
-                tx_buf[9]  = frame[33];
+                    tx_buf[8]  = frame[32];
+                    tx_buf[9]  = frame[33];
 
-                tx_buf[10] = frame[39];
-                tx_buf[11] = frame[40];
+                    tx_buf[10] = frame[39];
+                    tx_buf[11] = frame[40];
 
 
-                /*
-                 * UART空闲后发送12字节
-                 */
-                UARTTelemetry_QueueEcho(tx_buf, 12U);
+                    /*
+                     * UART空闲后发送12字节
+                     */
+                    /* TX/RX share huart1.Lock; RX rearm must not see TX setup locked. */
+                    echo_primask = __get_PRIMASK();
+                    __disable_irq();
+                    HAL_UART_Transmit_DMA(
+                        &huart1,
+                        tx_buf,
+                        12
+                    );
+                    __set_PRIMASK(echo_primask);
+                }
             }
         }
     }
 
-    /* Foreground-only UART owner; ADC continues at 500 Hz. */
-    UARTTelemetry_Poll();
   }
 
   /* USER CODE END 3 */

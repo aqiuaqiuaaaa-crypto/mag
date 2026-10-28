@@ -1,0 +1,6 @@
+{
+  "source_main_sha256": "fa5d005b9dede4168a274a3b53b8451e56605eea97418851d5f902022dad9894",
+  "frames": 1194,
+  "sha256_lf": "29deb45e27bb479b501c7ebbce1e6c0ef43af18ad1226e4f647c5d24c2decc8d",
+  "coverage": "Each command -99..99 on each channel; command values, preload/active CCRs, CTRL_SD, PWM channel masks, echo count and all 12 echo bytes. Normalize CRLF to LF only."
+}

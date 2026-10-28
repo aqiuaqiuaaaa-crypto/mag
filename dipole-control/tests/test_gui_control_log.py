@@ -19,22 +19,20 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from control_log import CONTROL_FIELDS, WORKER_FIELDS
-from curt_telemetry import parse_adc_line
-from PySide6.QtWidgets import QApplication
-from test_gui_curt_telemetry import (
+from gui_test_support import (
     MemorySerial,
-    adc_frame,
     connect,
     pump_until,
 )
+from PySide6.QtWidgets import QApplication
 
 # Reuse hardware-isolating fixtures, without changing the existing test module.
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 
 
 class SyntheticCamera:
@@ -112,10 +110,6 @@ def validate_types(records: list[dict[str, str]]) -> None:
         "seq",
         "frames_since",
         "max_cmd",
-        "adc_frame_count",
-        "adc_valid",
-        "adc_running",
-        "adc_error_flags",
         "horizon",
     }
     for row in records:
@@ -126,7 +120,7 @@ def validate_types(records: list[dict[str, str]]) -> None:
                 continue
             if field in booleans:
                 assert value in {"True", "False"}, (field, value)
-            elif field in integers or field.startswith(("cmd_", "raw")):
+            elif field in integers or field.startswith(("cmd_",)):
                 int(value)
             else:
                 float(value)
@@ -138,7 +132,7 @@ def finish_log(widget: gui.MagneticDipoleControl) -> None:
     widget._refresh_control_log_status()
 
 
-def test_real_qtimer_worker_adc_and_metadata(
+def test_real_qtimer_worker_and_metadata(
     window: gui.MagneticDipoleControl,
     app: QApplication,
     ports: list[MemorySerial],
@@ -154,7 +148,6 @@ def test_real_qtimer_worker_adc_and_metadata(
     start_log(window, tmp_path / "live.csv")
     sink = window.control_logger
     assert sink is not None
-    port.incoming.extend(adc_frame(77))
     window.timer.start(gui.cfg.TICK_MS)
     pump_until(app, lambda: window._control_tick_count >= start_tick + 16)
     window.timer.stop()
@@ -176,9 +169,8 @@ def test_real_qtimer_worker_adc_and_metadata(
     )
     assert all(None not in row for row in control + worker)
     validate_types(control + worker)
-    assert any(
-        row["adc_frame_count"] == "77" and row["raw5"] == "606" for row in control
-    )
+    assert not any(key.startswith(("adc_", "raw")) for key in CONTROL_FIELDS)
+    assert window.control_log_status_timer.isActive()
     assert any(
         row["executor_updated"] == "True" and row["cmd_exec_a0"] for row in control
     )
@@ -210,8 +202,8 @@ def test_real_qtimer_worker_adc_and_metadata(
         "mpc_weights",
     ):
         assert field in metadata
-    assert metadata["offset"]["adc_raw"] == [0] * 6
-    assert "raw counts" in metadata["semantics"]["ADC"]
+    assert metadata["schema_version"] == 2
+    assert "adc_raw" not in metadata["offset"] and "ADC" not in metadata["semantics"]
     assert metadata["gui"]["mpc_w_du"] == window.spin_mpc_w_du.value()
     written = len(control)
     window.tick()
@@ -219,7 +211,7 @@ def test_real_qtimer_worker_adc_and_metadata(
     assert "已停止" in window.lbl_control_log.text()
 
 
-def test_output_bits_identical_with_logging_and_adc(
+def test_output_bits_identical_with_logging(
     window: gui.MagneticDipoleControl,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -257,9 +249,6 @@ def test_output_bits_identical_with_logging_and_adc(
                 window.worker._step()
             for camera in cameras:
                 camera.fail = 20 <= tick < 23
-            # Deliberately different ADC data: it must have no control effect.
-            window.adc_snapshot = parse_adc_line(adc_frame(tick + 1))
-            window.adc_received_at = time.monotonic()
             elapsed = {}
             for widget in ((plain, window) if tick % 2 == 0 else (window, plain)):
                 start = time.perf_counter()
@@ -283,7 +272,6 @@ def test_output_bits_identical_with_logging_and_adc(
             row["frame_ok"] == "False" and row["meas_x_mm"] == "" for row in control
         )
         assert any(row["eso_updated"] == "True" and row["u_eso_x"] for row in control)
-        assert all(row["raw0"] == "101" for row in control)
         assert len(rows(sink.worker_path)) == 20
         assert median(auto_extra) < 1.0 and median(auto_capture) < 1.0
         print(

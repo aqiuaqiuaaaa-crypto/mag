@@ -13,12 +13,12 @@ from serial import SerialException, SerialTimeoutException
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as cfg
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 import test_stop_modes as stop_tests
+from gui_test_support import MemorySerial
 from multirate import ControlWorker
 from test_gui_control_log import configure_camera
-from test_gui_curt_telemetry import MemorySerial
 from test_stop_modes import (
     ACTIVE_MODES,
     ZERO_FRAME,
@@ -27,9 +27,9 @@ from test_stop_modes import (
     enter_mode,
 )
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 clock = stop_tests.clock
 FAULT_MESSAGE = "串口故障，STM32 可能仍保持最后成功命令"
 IO_ERRORS = (SerialTimeoutException("USB write timeout"), OSError("USB unplugged"))
@@ -206,7 +206,7 @@ def test_reconnect_zero_failure_keeps_fault_and_old_command(
     assert port.attempts == [ZERO_FRAME] and not port.frames and port.closed
     assert window.serial_fault and window.mode == "SERIAL_FAULT" and window.ser is None
     assert window.last_sent_cmd == previous
-    assert not window.adc_rx_timer.isActive()
+    assert window.ser is None
     assert_modes_cleared(window)
 
 

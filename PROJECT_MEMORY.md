@@ -2,7 +2,22 @@
 
 项目长期进度记忆源。以后处理本项目时，优先读取并在每阶段结束后更新本文件。
 
-## 正式 firmware build / release SOP（2026-10-06）
+
+## 当前状态（2026-10-28：移除 CURT/ADC，保留修复后的 MPC）
+
+- 本轮基线为 main / HEAD `0beec9bd8fed75b505dfb3de41eab9c28257609e`，upstream origin/main；暂存区为空。已有用户 gui_settings.json 改动逐字节保留，artifacts/、csvvvv/ 及11份实验CSV保留。未 commit、未 push、未烧录、未连接真实硬件。
+- CURT/ADC 专属上位机页面、接收/解码、raw状态、ADC CSV和测试已删除；15个GUI测试共享fixture先迁入 tests/gui_test_support.py 再删除旧测试。历史checkpoint回放仅在测试的临时import映射内从固定Git对象加载旧依赖，不恢复到生产代码。
+- 固件精确移除 ADC/current_sense/uart_telemetry、五个ADC HAL/LL文件、TIM3 TRGO、DMA2 Stream0采样、强ADC IRQ及工程/.ioc配置。保留通用CMSIS及startup弱向量别名；.ioc计数和Keil源表/uvoptx编号有回归验证。
+- 当前 main.c 从当前代码精确删除测量增量；12个解析/PWM/watchdog函数与清理前逐字节一致。原始 fa5d005b… 基线只能在撤销精确watchdog补丁和DMA echo保护后复现，并未用旧文件覆盖。恢复HAL_UART_Transmit_DMA 12字节回传，READY检查包住缓冲区写入，短临界区保留UART TX/RX共享锁保护。忙碌时丢回传而继续提交控制。
+- MPC-only、10/30Hz、legacy_three_frame、box27、FirstOrderESO gap保留z2、ESO/MPC一致性、freshness、path progress、frames、串口故障锁存/heartbeat、stop/coil scan清理、300ms watchdog/CTRL_SD/零输出恢复均保留。MPC/solver/multirate/estimators/frames/path/config/friction模块原字节保持。
+- 控制日志改为 schema_version=2，95/56列，删除11个测量字段及对应metadata；control_log_status_timer保留100ms刷新。当前没有统一控制日志生产导入器；外部分析必须按schema及列名读取，旧CSV不迁移、不覆盖。
+- 正式 clean-build 默认仍拒绝dirty源；新增显式 -InputManifest 精确绑定HEAD/status、删除和新增文件SHA、构建脚本/验收器SHA，允许审查后的未提交工作树构建，避免为构建擅自提交。清单漂移拒绝，构建后再核对；其余canonical clean/fresh/freeze/SHA门槛保持。
+- 2026-10-28 原工程正式Rebuild完成：0 errors / 1条原有缺末尾换行warning；Code/RO/RW/ZI=12378/458/60/2252 bytes。canonical HEX 36,321 bytes，SHA-256=`b3dd7100d8e1cc43e50c61b5761b73fe17f73cb529482e9cb445edce5268879e`。无@ADC/采样模块；watchdog、GPIO、协议/PWM/回传链接证据通过，HEX/AXF/BIN相同、canonical/frozen/verified SHA相同。最终manifest见 artifacts/curt-removal-20261028/release-final/manifest.json，先前release/为过程证据。
+- 验证完成：上位机592项pytest+57项独立脚本全部通过、GUI smoke通过；C场景30/30，1194帧含12字节echo与原始基线逐字节一致；固件/镜像17项及127 subtests、构建逻辑21项、整镜像故障注入10项通过。上位机/工具Ruff、Black和mypy45文件通过；新增/保留日志与夹具等5文件strict通过。清理前721通过+1个用户设置假设失败已保存，只修正测试副本；初轮6个旧GUI依赖导入失败修复后完整复跑通过。未放宽任何控制/性能门槛。
+- 下列2026-10-06及更早测量链章节均为历史记录，不能再作为当前启用功能或镜像选择依据。历史HEX和本轮构建前原canonical产物已归档；新镜像未上板。实物PWM极性/电压、CTRL_SD及实际超时恢复时序仍需硬件测量，软件证据不替代实测。
+- 完整三方差异、基线/最终测试、1194帧原始/当前trace、用户设置与实验数据保护检查在 artifacts/curt-removal-20261028/；汇总报告为 CURT_REMOVAL_VALIDATION.md。
+
+## 正式 firmware build / release SOP（2026-10-06，历史测量版规则）
 
 - 起始HEAD=`8ad47f5192f13c531cdffab8704e0edf93d14bf3`，tracked clean、仅artifacts未跟踪。本次独立checkpoint为`build: enforce canonical firmware artifact consistency`，仅流程工具/测试/SOP/记忆；不push、不烧录。
 - 历史RCA：watchdog的tracked source→staging Rebuild→artifacts验证成功，但没有canonical发布/一致性门槛，原工程HEX仍旧；属于canonical artifact consistency gap，不是uvprojx/Generate HEX/source list/build失败/restore旧HEX的问题。保留原prepare_build.py/verify_protection.py和历史HARDWARE_SOP等全部证据，不重写isolated validation流程。

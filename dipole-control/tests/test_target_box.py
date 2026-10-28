@@ -14,8 +14,8 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import config as cfg
+import gui_test_support as gui_tests
 import magnetic_dipole_pid as gui
-import test_gui_curt_telemetry as telemetry_tests
 from dipole_solver import DipoleSolver
 from multirate import CurrentExecutor, SharedState
 from test_freshness import FakeClock, FakeSolver, setup_worker
@@ -23,9 +23,9 @@ from test_gui_control_log import finish_log, rows, start_log
 from test_gui_freshness import start_tracking
 from test_l0_checkpoint_replay import exact, replay_checkpoint
 
-app = telemetry_tests.app
-ports = telemetry_tests.ports
-window = telemetry_tests.window
+app = gui_tests.app
+ports = gui_tests.ports
+window = gui_tests.window
 BASE = "9d0479e8655a1602bc45dd961f066be59dd94ad6"
 
 
@@ -144,7 +144,7 @@ def execute_frame(
     widget: gui.MagneticDipoleControl,
     shared: SharedState,
     executor: CurrentExecutor,
-    port: telemetry_tests.MemorySerial,
+    port: gui_tests.MemorySerial,
     limit: int,
 ) -> dict[str, Any]:
     previous = np.array(widget.last_sent_cmd)
@@ -169,7 +169,7 @@ def test_10000_random_targets_actual_uart(
     # Only forward-model diagnostics are stubbed; executor, both slew layers,
     # quantization, command frame builder and GUI serial write are production code.
     monkeypatch.setattr(window, "solver", FakeSolver())
-    port = telemetry_tests.MemorySerial()
+    port = gui_tests.MemorySerial()
     window.ser = port
     window.spin_cmd_max.setValue(limit)
     clock = FakeClock()
@@ -220,7 +220,7 @@ def test_t90_step_actual_uart(
     evidence: dict[str, dict[str, Any]] = {}
     for box in (9, 27):
         window.last_sent_cmd = [0] * 6
-        port = telemetry_tests.MemorySerial()
+        port = gui_tests.MemorySerial()
         window.ser = port
         clock = FakeClock()
         shared = SharedState(clock=clock)
@@ -253,7 +253,7 @@ def test_repeated_and_early_updates_no_old_rebound(
     window: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(window, "solver", FakeSolver())
-    window.ser = port = telemetry_tests.MemorySerial()
+    window.ser = port = gui_tests.MemorySerial()
     clock = FakeClock()
     shared = SharedState(clock=clock)
     executor = CurrentExecutor(clock=clock)
