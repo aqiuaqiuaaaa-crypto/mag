@@ -97,6 +97,7 @@ PATH_END_DECEL_MM = 2.0  # 最后 2 mm 降低参考速度；仅参考规划，�
 PATH_FINISH_TOL_MM = 0.25  # 终点位置与剩余弧长容差 (mm)
 PATH_FINISH_SPEED_MM_S = 0.2  # 估计速度模长上限 (mm/s)
 PATH_FINISH_DWELL_S = 0.5  # 新鲜状态连续满足条件的单调时间 (s)
+ENDPOINT_SETTLING_TIMEOUT_S = 10.0  # 终点保持的暂定上限；未经实机热安全验证
 
 # ---------- ESO ----------
 ESO_MODE = "first_order"  # L3 default; "legacy" for L0; GUI checkbox supplies off

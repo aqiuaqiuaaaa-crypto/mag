@@ -3,8 +3,9 @@
 Parent Python modules are read from the pinned local Git object, never from an
 unversioned artifact. Time measurements/callback identities and the added mode
 diagnostics are excluded; every parent control quantity and UART byte is checked.
-The current GUI uses a test-only historical ESO input adapter: this replay checks
-unchanged execution/stop behavior, not equivalence of the new raw-input controller.
+L0 exercises the production legacy input path without an adapter. L3 comparisons
+alone use historical filtered input to isolate execution/stop behavior from the
+intentional FirstOrderESO raw-input change.
 """
 
 from __future__ import annotations
@@ -227,7 +228,10 @@ def replay_checkpoint(
                     current.MagneticDipoleControl(),
                 ]
                 configure_mode(windows[1], controller_mode)
-                gui_tests.use_historical_eso_input(windows[1], monkeypatch)
+                if controller_mode != "L0":
+                    gui_tests.use_historical_eso_input(windows[1], monkeypatch)
+                else:
+                    assert "mpc_track_step" not in vars(windows[1])
                 windows[1].combo_target_box.setCurrentText(str(target_box_delta))
                 windows[1].combo_interpolation.setCurrentText("legacy_three_frame")
                 ports = [MemorySerial(), MemorySerial()]
@@ -353,7 +357,11 @@ def replay_checkpoint(
         "target_box_delta": target_box_delta,
         "profile": profile,
         "include_vision_gap": include_vision_gap,
-        "eso_input_adapter": "historical Kalman position and control dt, current GUI only",
+        "eso_input_adapter": (
+            "none: production legacy input and tick dt"
+            if controller_mode == "L0"
+            else "historical Kalman position and control dt, current GUI only"
+        ),
         "status": "PASS",
         "cases": cases,
         "frames": sum(c["frames"] for c in cases),

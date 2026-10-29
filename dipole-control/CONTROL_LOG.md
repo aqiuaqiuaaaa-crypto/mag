@@ -85,6 +85,10 @@ SharedState 自行记录输入/参数/目标的 monotonic 时间，旧 wall-cloc
 
 三个数值仅为当前保守软件门槛，尚未实机标定。视觉丢失时不会因 KF 预测而续期 SharedState 输入；原视觉丢失 >1 s 正常停止保留，计时改用 monotonic。过期暂停期间重复最后成功帧，不刷新目标年龄、不改变 serial/heartbeat 实现。超时状态在正常归零后保留供诊断，下一次 tracking 启动复位；freshness 不阻止其他既有手动模式入口。
 
+2026-10-29 B1/N5：FirstOrderESO使用同帧原始视觉位置及其观测间隔；legacy ESO1D恢复Kalman位置和GUI tick dt（原0.005…0.2 s限制）。MPC继续使用Kalman状态及正常ESO补偿。`dt_ms`仍是tick dt，不是FirstOrderESO的观测间隔，不能用它重建失帧后的ESO更新。
+
+终点保持超时复用控制CSV的`stale_status=SETTLING_TIMEOUT`，同时`finished=False`；这是失败退出，随后STOPPING逐帧归零，状态保留到下次tracking。没有新增CSV字段，schema与95/56列不变，metadata中的状态说明及config快照已更新。worker行仍反映其原freshness，不能单看worker的FRESH推断任务成功。计时从首次成功提交终点保持目标开始，默认10 s，失帧/不合格状态只重置成功dwell，不重置超时预算；坏时钟或无效超时参数也走未完成的正常停止。细节、暂定值依据与实机验证边界见[ENDPOINT_SETTLING.md](ENDPOINT_SETTLING.md)。
+
 STALE_INPUT 的 worker 事件沿用当前 run/seq，MPC/solver/target 列留空，表示本周期未计算、未发布；不能把它统计为一个新目标。正常 worker 行为 FRESH，只有成功目标发布才增加 seq。30 Hz 同时存在 input/target 失效时，显示优先级为 target timeout → stale target → stale input → fresh。FRESH 的非 tracking 行表示当前模式不使用该共享控制目标，不应把其 age 当作正在执行的 AUTO_TRACK 数据。
 
 ## 统一路径进度（2026-10-06）

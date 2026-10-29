@@ -174,17 +174,26 @@ def test_real_qtimer_worker_and_metadata(
     assert any(
         row["executor_updated"] == "True" and row["cmd_exec_a0"] for row in control
     )
-    worker_targets = {(row["run"], row["seq"]): row for row in worker}
+    # A STALE_INPUT event retains seq but publishes no target. It must not
+    # replace the FRESH publication when joining executor rows by run/seq.
+    target_fields = (
+        "F_target_x",
+        "F_target_y",
+        "F_target_z",
+        "ref_x",
+        "I_target_0",
+    )
+    worker_targets = {}
+    for row in worker:
+        if row["stale_status"] == "FRESH":
+            worker_targets[row["run"], row["seq"]] = row
+        else:
+            assert row["stale_status"] == "STALE_INPUT"
+            assert all(row[field] == "" for field in target_fields)
     for row in control:
         key = row["run"], row["seq"]
         if key in worker_targets:
-            for field in (
-                "F_target_x",
-                "F_target_y",
-                "F_target_z",
-                "ref_x",
-                "I_target_0",
-            ):
+            for field in target_fields:
                 assert row[field] == worker_targets[key][field]
     assert all(len(frame) == 43 for frame in port.frames)
     metadata = json.loads(sink.metadata_path.read_text(encoding="utf8"))

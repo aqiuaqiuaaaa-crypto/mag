@@ -1879,7 +1879,7 @@ class MagneticDipoleControl(QMainWindow):
                 "path_deviation": "fresh worker projection exceeded configured path loss distance",
                 "kalman_age_ms": "monotonic age of shared input; worker row uses consumed snapshot",
                 "target_age_ms": "monotonic age of executor-checked target; latest publication if executor not run",
-                "stale_status": "FRESH / STALE_INPUT / STALE_TARGET / STALE_TARGET_TIMEOUT",
+                "stale_status": "FRESH / STALE_INPUT / STALE_TARGET / STALE_TARGET_TIMEOUT / SETTLING_TIMEOUT",
                 "cmd_sent": "final safety-layer command state; not a hardware delivery acknowledgement",
                 "dropped": "cumulative queue overflows across both streams before this row",
             },
@@ -2963,8 +2963,15 @@ class MagneticDipoleControl(QMainWindow):
         # 用上一帧实际执行器估计磁力更新 z3，再把最新扰动力发布给 10Hz MPC。
         if self.chk_eso.isChecked():
             u_xy_uN = np.asarray(self.last_F_actual[:2], float) * 1e6
-            self.z3[0] = self.eso_x.step(observation_dt, raw_pos[0], u_xy_uN[0])
-            self.z3[1] = self.eso_y.step(observation_dt, raw_pos[1], u_xy_uN[1])
+            for axis, observer in enumerate((self.eso_x, self.eso_y)):
+                if isinstance(observer, FirstOrderESO):
+                    self.z3[axis] = observer.step(
+                        observation_dt, raw_pos[axis], u_xy_uN[axis]
+                    )
+                else:
+                    # Legacy history: Kalman position and this GUI tick's dt,
+                    # clamped to [0.005, 0.2] in tick(), even across vision gaps.
+                    self.z3[axis] = observer.step(dt, pos[axis], u_xy_uN[axis])
             if self._control_tick_row is not None:
                 self._control_tick_row.update(
                     eso_updated=True,
@@ -3030,6 +3037,13 @@ class MagneticDipoleControl(QMainWindow):
         """Read worker authority; target_idx is only a derived display value."""
         progress = self.shared.get_progress()
         self.target_idx = progress.target_idx
+        if self.shared.settling_timed_out():
+            self.stale_status = "SETTLING_TIMEOUT"
+            self.lbl_dir.setText(
+                "⚠ SETTLING_TIMEOUT：终点停稳超时，任务未完成，正常归零"
+            )
+            self.normal_stop()
+            return False
         if progress.path_deviation:
             self.lbl_dir.setText(
                 f"⚠ PATH_DEVIATION：偏离路径 {progress.distance_mm:.2f} mm，正常停止"
@@ -3083,6 +3097,7 @@ class MagneticDipoleControl(QMainWindow):
                 "finish_tol_mm": self.spin_tol_default(),
                 "finish_speed_mm_s": cfg.PATH_FINISH_SPEED_MM_S,
                 "finish_dwell_s": cfg.PATH_FINISH_DWELL_S,
+                "settling_timeout_s": cfg.ENDPOINT_SETTLING_TIMEOUT_S,
                 "end_decel_mm": cfg.PATH_END_DECEL_MM,
                 "mpc_horizon": self.spin_mpc_horizon.value(),
                 "mpc_w_pos": self.spin_mpc_w_pos.value(),

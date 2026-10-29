@@ -145,13 +145,18 @@ def publish_camera_observation(
 def use_historical_eso_input(
     widget: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Only for pinned golden replays: restore the historical ESO input contract.
+    """Only for pinned FirstOrderESO replays: restore historical filtered input.
 
     Keep the original Kalman position/control dt so unrelated UART, executor,
     stop and solver quantities can still be compared byte for byte. Production
     raw observations are exercised without this adapter in observation, gap and
     closed-loop tests. This does not change or regenerate the golden data.
+    Legacy must exercise its actual production path, never this adapter.
     """
+    assert all(
+        isinstance(observer, gui.FirstOrderESO)
+        for observer in (widget.eso_x, widget.eso_y)
+    )
     track = widget.mpc_track_step
 
     def historical_track(dt: float) -> None:

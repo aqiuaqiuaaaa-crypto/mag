@@ -88,6 +88,9 @@ class SharedState:
         self._reference_version = 0
         self._progress = PathProgress()
         self._settling = EndpointSettling()
+        self._endpoint_hold_since: float | None = None
+        self._endpoint_clock_last: float | None = None
+        self._settling_timed_out = False
         self._last_sent = [0] * 6
         # 工作线程 → 主线程
         # currents 始终使用安培；串口整数指令只存在 rec["commands"] 中。
@@ -123,6 +126,7 @@ class SharedState:
     def set_kalman(self, pos, vel, t):
         with self._lock:
             now = self.clock()
+            self._expire_settling_locked(now)
             self._kalman = {
                 "pos": np.array(pos, float).copy(),
                 "vel": np.array(vel, float).copy(),
@@ -139,6 +143,7 @@ class SharedState:
             path = self._ref["path"]
             eligible = bool(
                 not self._stop.is_set()
+                and not self._settling_timed_out
                 and self._params.get("mpc_on", False)
                 and path
                 and self._progress.holding_endpoint
@@ -181,6 +186,36 @@ class SharedState:
             or target_status(now - self._I_target["t_mono"]) != "FRESH"
         ):
             self._reset_settling_locked()
+        self._check_settling_timeout_locked(now)
+
+    def _check_settling_timeout_locked(self, now: float) -> None:
+        """Bound total hold time, independently of the resettable success dwell."""
+        since, last = self._endpoint_hold_since, self._endpoint_clock_last
+        if since is None or self._stop.is_set() or self._settling_timed_out:
+            return
+        if self._progress.finished:
+            return  # a fresh, already confirmed success is not a timeout
+        limit = float(
+            self._params.get("settling_timeout_s", cfg.ENDPOINT_SETTLING_TIMEOUT_S)
+        )
+        # A broken monotonic source or invalid timeout must not extend the hold.
+        if (
+            not math.isfinite(now)
+            or not math.isfinite(since)
+            or (last is not None and now < last)
+            or not math.isfinite(limit)
+            or limit <= 0
+            or now - since >= limit
+        ):
+            self._settling_timed_out = True
+            self._reset_settling_locked()
+        self._endpoint_clock_last = now
+
+    def settling_timed_out(self) -> bool:
+        """Latched unsuccessful outcome; GUI performs the normal-stop ramp."""
+        with self._lock:
+            self._expire_settling_locked(self.clock())
+            return self._settling_timed_out
 
     def set_reference(self, path_world_mm, speed, t):
         with self._lock:
@@ -191,6 +226,9 @@ class SharedState:
             }
             self._reference_version += 1
             self._settling.reset()
+            self._endpoint_hold_since = None
+            self._endpoint_clock_last = None
+            self._settling_timed_out = False
             self._progress = PathProgress(
                 s_total=PathGeometry.from_path(path_world_mm).total
             )
@@ -345,7 +383,17 @@ class SharedState:
                 return False
             seq = self._I_target["seq"] + 1
             self._expire_settling_locked(publish_mono)
+            if self._settling_timed_out:
+                return False
             if progress is not None:
+                if progress.holding_endpoint and self._endpoint_hold_since is None:
+                    # Start only at the first accepted hold target, never at
+                    # entry to the deceleration region or at solve start.
+                    self._endpoint_hold_since = publish_mono
+                    self._endpoint_clock_last = publish_mono
+                    self._check_settling_timeout_locked(publish_mono)
+                    if self._settling_timed_out:
+                        return False
                 if not progress.at_endpoint or not progress.holding_endpoint:
                     self._settling.reset()
                 progress = replace(
