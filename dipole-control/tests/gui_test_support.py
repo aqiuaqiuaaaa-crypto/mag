@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import cast
 
 import cv2
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -126,6 +127,47 @@ def connect(
     assert window.ser is port
     assert isinstance(port, MemorySerial)
     return port
+
+
+def publish_camera_observation(
+    widget: gui.MagneticDipoleControl, position_mm=None
+) -> None:
+    """Feed a timestamped camera sample without changing a test's seeded KF state."""
+    if position_mm is not None:
+        widget.bead = (*widget.world_mm_to_px(position_mm), 200)
+    assert widget.bead is not None
+    widget._vision_observation = (
+        np.asarray(widget.px_to_world_mm(widget.bead[:2]), float),
+        widget.control_clock(),
+    )
+
+
+def use_historical_eso_input(
+    widget: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only for pinned golden replays: restore the historical ESO input contract.
+
+    Keep the original Kalman position/control dt so unrelated UART, executor,
+    stop and solver quantities can still be compared byte for byte. Production
+    raw observations are exercised without this adapter in observation, gap and
+    closed-loop tests. This does not change or regenerate the golden data.
+    """
+    track = widget.mpc_track_step
+
+    def historical_track(dt: float) -> None:
+        with monkeypatch.context() as patch:
+            for axis, observer in enumerate((widget.eso_x, widget.eso_y)):
+                step = observer.step
+
+                def historical_step(
+                    observation_dt, raw_position, force, *, step=step, axis=axis
+                ):
+                    return step(dt, widget.state_pos_mm[axis], force)
+
+                patch.setattr(observer, "step", historical_step)
+            track(dt)
+
+    monkeypatch.setattr(widget, "mpc_track_step", historical_track)
 
 
 def pump_until(app: QApplication, ready: Callable[[], bool]) -> None:

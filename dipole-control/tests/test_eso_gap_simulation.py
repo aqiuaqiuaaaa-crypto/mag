@@ -51,13 +51,14 @@ def save_evidence(name: str, result: dict[str, Any]) -> None:
 
 @pytest.mark.parametrize("profile", ["defaults", "saved"])
 @pytest.mark.parametrize("scenario", SCENARIOS)
-def test_no_gap_l3_parent_trace_is_bit_identical(
+def test_historical_kalman_input_no_gap_l3_parent_trace_is_bit_identical(
     window: gui.MagneticDipoleControl,
     monkeypatch: pytest.MonkeyPatch,
     profile: str,
     scenario: str,
 ) -> None:
     monkeypatch.setattr(ControlWorker, "start", lambda self: None)
+    gui_tests.use_historical_eso_input(window, monkeypatch)
     result = run_simulation(
         window, "L3", scenario, profile=profile, target_box_delta=27
     )

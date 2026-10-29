@@ -93,7 +93,7 @@ worker 是唯一 progress 计算者；SharedState 保存冻结的 PathProgress�
 
 每次 tracking 创建新 SharedState/worker；set_reference 也重置 s_progress=0、finished=False、deviation=False，并递增 reference generation。原 lead、生成器和 resample 不改；s_total 包含 lead，闭合图形也沿用原始首尾点，不自动增加闭合边。
 
-局部窗口为 `[max(0,s_prev-0.3), min(s_total,s_prev+max(1.0,3*(Fmax/c)*T_mpc))]` mm，逐线段按窗口裁剪投影。最近距离 >1.5 mm 才向前扩大至路径尾部；扩大后距离 >3 mm 时发布 PATH_DEVIATION 状态，保留原 arc/target/seq/时间戳，由 GUI 调用原 normal_stop。恰好 1.5/3 mm 不升级。finish 同时要求 s_progress ≥ s_total-finish_tol、到实际终点的距离 ≤ finish_tol；finish_tol 复用原 GUI 的0.5 mm默认。六个默认集中于 config，均非实机最终标定参数。
+局部窗口为 `[max(0,s_prev-0.3), min(s_total,s_prev+max(1.0,3*(Fmax/c)*T_mpc))]` mm，逐线段按窗口裁剪投影。最近距离 >1.5 mm 才向前扩大至路径尾部；扩大后距离 >3 mm 时发布 PATH_DEVIATION 状态，保留原 arc/target/seq/时间戳，由 GUI 调用原 normal_stop。恰好 1.5/3 mm 不升级。终点参考采用连续减速并保持终点；finished 还要求末端弧长、位置误差、估计速度与持续新鲜状态停稳时间同时满足条件。几何投影本身不再直接发布 finished。暂定参数统一定义于 config，详见 [ENDPOINT_SETTLING.md](ENDPOINT_SETTLING.md)，均非实机最终标定值。
 
 STALE_INPUT/慢求解被拒绝时不推进进度。PATH_DEVIATION 的 worker 行沿用旧 seq，未计算的 target/solver 列为空；其 path_deviation 为True。30 Hz progress 取最新 SharedState，故即使已结束但执行器尚未采用最终 seq，finished 仍正确记录True。参考/F/I字段仍表示实际执行器采用的目标，不能误认为它们永远和最新 progress 属于同一 seq。
 

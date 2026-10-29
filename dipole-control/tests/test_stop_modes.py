@@ -34,9 +34,15 @@ ZERO_FRAME = b"a0:+00,a1:+00,a2:+00,a3:+00,a4:+00,a5:+00\r\n"
 
 
 @pytest.fixture
-def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Use identical control dt; run the actual MPC worker at explicit deadlines."""
+def clock(
+    window: gui.MagneticDipoleControl, monkeypatch: pytest.MonkeyPatch
+) -> list[float]:
+    """Advance control dt and freshness on one explicitly controlled timebase."""
     value = [1000.0]
+    # Solver/runtime load must not age inputs while simulated time is paused.
+    window.control_clock = lambda: value[0]
+    window.shared = gui.SharedState(clock=window.control_clock)
+    window.executor.clock = window.control_clock
     monkeypatch.setattr(gui.time, "time", lambda: value[0])
     monkeypatch.setattr(gui.ControlWorker, "start", lambda self: None)
     return value

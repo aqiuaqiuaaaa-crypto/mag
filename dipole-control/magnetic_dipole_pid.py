@@ -320,6 +320,9 @@ class MagneticDipoleControl(QMainWindow):
         self.frame = None
         self.frame_size = (cfg.FRAME_W, cfg.FRAME_H)
         self.bead = None
+        # One camera-world observation (mm, monotonic read-completion time).
+        self._vision_observation = None
+        self._eso_observation_mono = None
         self.traj_px, self.traj_mm = [], []
         # 截图/录像均保存 render() 生成的最终标注画面，因此会包含路径、
         # 目标点、磁珠轮廓以及 B/F 箭头。录像尺寸在开始时固定，窗口缩放后
@@ -334,7 +337,7 @@ class MagneticDipoleControl(QMainWindow):
         # ---------- 状态估计 ----------
         self.kf = KalmanFilter2D(cfg.KALMAN_Q_POS, cfg.KALMAN_Q_VEL, cfg.KALMAN_R)
         self.ema_vel = np.zeros(2)
-        self.state_pos_mm = np.zeros(2)  # 估计器输出（供 MPC/ESO）
+        self.state_pos_mm = np.zeros(2)  # 估计器输出（供 MPC）
         self.state_vel_mm = np.zeros(2)
         self.last_pos_mm = None
 
@@ -1571,6 +1574,8 @@ class MagneticDipoleControl(QMainWindow):
         """参数变化后重建 ESO（b0=1/c 随黏度/珠径变化）"""
         self.eso_x = self._make_eso()
         self.eso_y = self._make_eso()
+        self._vision_observation = None
+        self._eso_observation_mono = None
         self.kf = KalmanFilter2D(
             self.spin_q_pos.value(), self.spin_q_vel.value(), self.spin_r_meas.value()
         )
@@ -1600,6 +1605,7 @@ class MagneticDipoleControl(QMainWindow):
         self.cap = None
         self.frame = None
         self.bead = None
+        self._vision_observation = None
         self.last_render_bgr = None
 
     @staticmethod
@@ -1869,7 +1875,7 @@ class MagneticDipoleControl(QMainWindow):
                 "seq": "executor-used target sequence; join worker with (run,seq)",
                 "s_progress": "latest committed worker arc in mm; GUI finish/display authority, may be newer than executor seq",
                 "s_total": "total path arc including unchanged lead segment, mm",
-                "finished": "committed arc and endpoint both within original finish tolerance",
+                "finished": "terminal reference held; fresh position and speed within configured limits for continuous monotonic dwell",
                 "path_deviation": "fresh worker projection exceeded configured path loss distance",
                 "kalman_age_ms": "monotonic age of shared input; worker row uses consumed snapshot",
                 "target_age_ms": "monotonic age of executor-checked target; latest publication if executor not run",
@@ -2435,6 +2441,8 @@ class MagneticDipoleControl(QMainWindow):
         """模式切换/启动时复位 ESO（KF 保持连续）"""
         self.eso_x = self._make_eso()
         self.eso_y = self._make_eso()
+        self._vision_observation = None
+        self._eso_observation_mono = None
         self.z3 = np.zeros(2)  # compatibility vector: disturbance force for either ESO
 
     def _restart_first_order_eso(self, enabled: bool) -> None:
@@ -2590,12 +2598,25 @@ class MagneticDipoleControl(QMainWindow):
         self.mode = "COIL_TEST"
 
     # ================= 状态估计 =================
-    def estimate_state(self, dt, detected):
+    def estimate_state(self, dt, detected, *, observation_mono=None):
         """视觉 → 状态估计（RAW/EMA/KALMAN），输出位置与速度 (mm, mm/s)"""
-        if detected and self.bead:
-            z = np.array(self.px_to_world_mm(self.bead[:2]))
+        self._vision_observation = None
+        z = None
+        if detected and self.bead is not None:
+            try:
+                candidate = np.asarray(self.px_to_world_mm(self.bead[:2]), float)
+                if candidate.shape == (2,) and np.all(np.isfinite(candidate)):
+                    z = candidate
+            except (TypeError, ValueError):
+                pass
+        if z is None:
+            self.bead = None
         else:
-            z = None
+            # Explicit timestamps also support synthetic camera/test observations.
+            stamp = (
+                self.control_clock() if observation_mono is None else observation_mono
+            )
+            self._vision_observation = (z.copy(), float(stamp))
         est = self.combo_estimator.currentText()
         if est == "KALMAN":
             p, v = self.kf.step(dt, z)
@@ -2640,16 +2661,19 @@ class MagneticDipoleControl(QMainWindow):
         # 1-2. 相机 + 检测
         t0 = time.perf_counter()
         mask = None
+        observation_mono = None
         if self.cap:
             ret, frame = self.cap.read()
             if ret:
                 self.frame = frame
+                observation_mono = self.control_clock()
             else:
                 # 不得继续识别上一张旧图，否则相机掉线后 bead 会永久保持“可见”。
                 self.frame = None
                 self.bead = None
         detected = False
-        if self.frame is not None:
+        self.bead = None
+        if self.frame is not None and observation_mono is not None:
             vp = {
                 "mode": self.combo_mode.currentText(),
                 "thresh": self.sld_thresh.value(),
@@ -2668,13 +2692,15 @@ class MagneticDipoleControl(QMainWindow):
                 "r_max": self.spin_rmax.value(),
             }
             cx, cy, area, mask = detect_bead(self.frame, vp)
-            self.bead = None if cx is None else (cx, cy, area)
-            detected = cx is not None
+            if cx is not None and cy is not None:
+                self.bead = (cx, cy, area)
+                detected = True
         self.vision_ms = (time.perf_counter() - t0) * 1e3
 
         # 3. 状态估计
         t1 = time.perf_counter()
-        self.estimate_state(dt, detected)
+        self.estimate_state(dt, detected, observation_mono=observation_mono)
+        detected = self.bead is not None
         self.estimator_ms = (time.perf_counter() - t1) * 1e3
         self._update_local_field_force()
 
@@ -2895,9 +2921,24 @@ class MagneticDipoleControl(QMainWindow):
 
     # ================= MPC 模式（30Hz 电流执行，10Hz MPC/MDM 在工作线程） =================
     def mpc_track_step(self, dt):
-        if not self._check_path_progress():
-            return
-        if self.bead is None:
+        observation = self._vision_observation
+        self._vision_observation = None  # Never consume the same detection twice.
+        fresh = self.bead is not None and observation is not None
+        if fresh:
+            raw_pos, stamp = observation
+            age = self.control_clock() - stamp
+            fresh = (
+                math.isfinite(stamp)
+                and 0 <= age <= cfg.KALMAN_STALE_S
+                and (
+                    self._eso_observation_mono is None
+                    or stamp > self._eso_observation_mono
+                )
+            )
+        if not fresh:
+            self.shared.reset_settling()
+            if not self._check_path_progress():
+                return
             for observer in (self.eso_x, self.eso_y):
                 if isinstance(observer, FirstOrderESO):
                     observer.mark_gap()
@@ -2911,13 +2952,19 @@ class MagneticDipoleControl(QMainWindow):
                 self._send_idle_heartbeat()  # same last-successful command while paused
             return
         self.lost_since = None
+        observation_dt = (
+            dt
+            if self._eso_observation_mono is None
+            else stamp - self._eso_observation_mono
+        )
+        self._eso_observation_mono = stamp
         pos = self.state_pos_mm
         now = time.time()
         # 用上一帧实际执行器估计磁力更新 z3，再把最新扰动力发布给 10Hz MPC。
         if self.chk_eso.isChecked():
             u_xy_uN = np.asarray(self.last_F_actual[:2], float) * 1e6
-            self.z3[0] = self.eso_x.step(dt, pos[0], u_xy_uN[0])
-            self.z3[1] = self.eso_y.step(dt, pos[1], u_xy_uN[1])
+            self.z3[0] = self.eso_x.step(observation_dt, raw_pos[0], u_xy_uN[0])
+            self.z3[1] = self.eso_y.step(observation_dt, raw_pos[1], u_xy_uN[1])
             if self._control_tick_row is not None:
                 self._control_tick_row.update(
                     eso_updated=True,
@@ -2935,6 +2982,10 @@ class MagneticDipoleControl(QMainWindow):
             self.normal_stop()
             return
         if not self._check_control_freshness():
+            return
+        # Publish/revalidate this tick's state BEFORE accepting completion.
+        # A new excursion or missing frame must cancel a previous ready flag.
+        if not self._check_path_progress():
             return
         # 30Hz 电流执行层：插值 → 斜率限幅 → 量化 → 发送
         t0 = time.perf_counter()
@@ -3030,6 +3081,9 @@ class MagneticDipoleControl(QMainWindow):
             {
                 "fmax": self.spin_mpc_fmax.value(),
                 "finish_tol_mm": self.spin_tol_default(),
+                "finish_speed_mm_s": cfg.PATH_FINISH_SPEED_MM_S,
+                "finish_dwell_s": cfg.PATH_FINISH_DWELL_S,
+                "end_decel_mm": cfg.PATH_END_DECEL_MM,
                 "mpc_horizon": self.spin_mpc_horizon.value(),
                 "mpc_w_pos": self.spin_mpc_w_pos.value(),
                 "mpc_w_vel": self.spin_mpc_w_vel.value(),

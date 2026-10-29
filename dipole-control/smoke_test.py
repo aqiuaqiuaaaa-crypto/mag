@@ -45,6 +45,23 @@ class MemorySerial:
 
 serial_sink = MemorySerial()
 w.ser = serial_sink
+
+
+class PositionCamera:
+    """Produce a fresh synthetic image of the smoke model's current bead."""
+
+    def read(self):
+        frame = np.full((1080, 1920, 3), 255, dtype=np.uint8)
+        if w.bead is not None:
+            cx, cy = w.bead[:2]
+            cv2.circle(frame, (round(cx), round(cy)), 15, (0, 0, 0), -1)
+        return True, frame
+
+    def release(self):
+        pass
+
+
+w.cap = PositionCamera()
 w.show()
 w.resize(1000, 650)
 app.processEvents()
@@ -211,6 +228,8 @@ print("急停帧:", m.build_command([0] * 6)[0].strip())
 # 回归：到达最后一个路径点后必须结束，不能在零长度切线处生成标量 v_des
 w.bead = (960, 540, 300)
 w.state_pos_mm = np.zeros(2)
+w.state_vel_mm = np.zeros(2)
+w.kf.reset(0, 0)
 w.path_px = [(960, 540)]
 w.start_tracking()  # worker is the sole finish authority, including zero length
 finish_deadline = time.monotonic() + 1.0
@@ -218,6 +237,7 @@ while not w.shared.get_progress().finished and time.monotonic() < finish_deadlin
     w.shared.set_kalman(w.state_pos_mm, w.state_vel_mm, time.time())
     time.sleep(0.01)
 assert w.shared.get_progress().finished
+w.estimate_state(1.0 / 30.0, True)
 w.control_step(1.0 / 30.0)
 assert not w.tracking and w.stopping
 w.emergency_stop()
@@ -238,6 +258,7 @@ assert w.worker is not None and w.worker.is_alive()
 first_shared = w.shared
 for _ in range(12):
     time.sleep(0.04)
+    w.estimate_state(1.0 / 30.0, True)
     w.mpc_track_step(1.0 / 30.0)
 target_A, seq, _, _ = w.shared.get_I_target()
 assert seq > 0 and np.max(np.abs(target_A)) <= m.cfg.MAX_CURRENT_A + 1e-9
@@ -253,6 +274,7 @@ assert np.all(np.isfinite(w.shared._I_target["ref_target"]))
 w.spin_mpc_w_pos.setValue(3.5)
 for _ in range(4):
     time.sleep(0.04)
+    w.estimate_state(1.0 / 30.0, True)
     w.mpc_track_step(1.0 / 30.0)
 assert w.worker.mpc_x.wp == 3.5
 # 正式实验导出仅包含原有 24 列 MPC 数据，保留字段顺序和数据值。

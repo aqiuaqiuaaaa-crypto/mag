@@ -201,6 +201,7 @@ def test_worker_and_executor_share_position_transform(
     ):
         rec = snap["rec"]
         assert rec[key].tobytes() == model_to_cam_vec(rec[key + "_model"], R).tobytes()
+    gui_tests.publish_camera_observation(window)
     window.mpc_track_step(1 / 30)
     assert_model_positions(forward, p)
     diag = window.last_diag

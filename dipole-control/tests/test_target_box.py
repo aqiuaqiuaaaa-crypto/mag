@@ -356,6 +356,7 @@ def test_gui_default_persistence_manual_and_seq_log(
     window.combo_target_box.setCurrentText("27")
     window.load_settings()
     assert window.combo_target_box.currentText() == "9"
+    clock.now += 1 / 30  # A new camera observation, not a repeated timestamp.
     window.tick()  # UI changed; executor still uses the older 27 target
     assert window.executor.seq == old_seq
     assert window.worker is not None

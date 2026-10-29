@@ -139,7 +139,8 @@ def test_mpc_mdm_10hz():
 @test
 def test_mpc_path_tangent_reference():
     worker = ControlWorker(SharedState(), S)
-    path = [np.array([0.0, 0.0]), np.array([3.0, 0.0])]
+    # Keep tangent/projection checks outside the configurable terminal zone.
+    path = [np.array([0.0, 0.0]), np.array([10.0, 0.0])]
     ref, vref = worker._reference_window(path, 1.0, np.array([0.0, 0.0]))
     assert len(ref) == cfg.MPC_HORIZON and len(vref) == cfg.MPC_HORIZON
     assert all(abs(v[1]) < 1e-12 and v[0] >= 0.0 for v in vref)
@@ -222,7 +223,8 @@ def test_mpc_live_parameter_refresh():
     shared = SharedState()
     worker = ControlWorker(shared, S)
     shared.set_kalman(np.zeros(2), np.zeros(2), time.time())
-    shared.set_reference([np.zeros(2), np.array([2.0, 0.0])], 1.0, time.time())
+    # Exercise parameter refresh at cruise speed, before terminal deceleration.
+    shared.set_reference([np.zeros(2), np.array([10.0, 0.0])], 1.0, time.time())
     params = {
         "fmax": 25.0,
         "mpc_on": True,

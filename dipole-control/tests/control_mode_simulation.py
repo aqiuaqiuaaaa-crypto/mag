@@ -187,6 +187,15 @@ def run_simulation(
                 "time_s": (tick + 1) * dt,
                 "pos_mm": (plant.pos * 1e3).tolist(),
                 "velocity_mm_s": actual_velocity.tolist(),
+                **(
+                    {
+                        "state_mm": widget.state_pos_mm.tolist(),
+                        "state_velocity_mm_s": widget.state_vel_mm.tolist(),
+                        "holding_endpoint": widget.shared.get_progress().holding_endpoint,
+                    }
+                    if path_mm is not None
+                    else {}
+                ),
                 "d_hat_uN": disturbances.tolist(),
                 "d_true_uN": true_d.tolist(),
                 "F_target_uN": target.tolist(),
@@ -260,6 +269,8 @@ def run_simulation(
         "seed": seed,
         "plant_substeps": plant_substeps,
         "completion_time_s": completion_time,
+        "final_state_mm": widget.state_pos_mm.tolist(),
+        "final_state_velocity_mm_s": widget.state_vel_mm.tolist(),
         "executed_ticks": count,
         "path_mm": path_mm,
         "max_target_delta_cmd": float(np.max(abs(target_changes))),

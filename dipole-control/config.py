@@ -92,7 +92,11 @@ PATH_PROJ_FWD_MIN_MM = 1.0
 PATH_PROJ_FWD_FACTOR = 3.0  # forward = max(min_mm, factor * (Fmax/c) * T_mpc)
 PATH_LOCAL_PROJ_MAX_DIST_MM = 1.5
 PATH_LOST_DIST_MM = 3.0
-PATH_FINISH_TOL_MM = 0.5  # 保留 GUI spin_tol_default 原默认语义
+# 终端参数均基于尚未平面标定的名义 mm；不是实机精度/制动能力保证。
+PATH_END_DECEL_MM = 2.0  # 最后 2 mm 降低参考速度；仅参考规划，不是物理减速度
+PATH_FINISH_TOL_MM = 0.25  # 终点位置与剩余弧长容差 (mm)
+PATH_FINISH_SPEED_MM_S = 0.2  # 估计速度模长上限 (mm/s)
+PATH_FINISH_DWELL_S = 0.5  # 新鲜状态连续满足条件的单调时间 (s)
 
 # ---------- ESO ----------
 ESO_MODE = "first_order"  # L3 default; "legacy" for L0; GUI checkbox supplies off

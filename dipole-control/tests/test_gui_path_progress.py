@@ -44,13 +44,19 @@ def test_worker_finished_is_gui_authority_and_logged(
         clock.now += 0.01
         window.shared.set_kalman([x, 0], [0, 0], clock.now)
         worker._step()
+    assert not window.shared.get_progress().finished
+    for _ in range(6):
+        clock.now += 0.125
+        window.shared.set_kalman(end, [0, 0], clock.now)
+        worker._step()
     progress = window.shared.get_progress()
     assert progress.finished and worker.finished
     assert worker.s_progress == progress.s_progress
-    # The GUI target index cannot prevent a worker-declared finish, including
-    # the loss-of-vision early-return route.
+    # Completion remains authoritative only with a current valid observation.
     window.target_idx = 0
-    window.bead = None
+    window.kf.reset(*end)
+    px = window.world_mm_to_px(end)
+    monkeypatch.setattr(gui, "detect_bead", lambda *_: (*px, 200.0, None))
     normal = Mock(wraps=window.normal_stop)
     emergency = Mock(wraps=window.emergency_stop)
     monkeypatch.setattr(window, "normal_stop", normal)

@@ -35,7 +35,7 @@ import numpy as np
 from control_log import ControlLogger, Scalar
 from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from numpy.typing import NDArray
-from path_progress import PathGeometry, PathProgress
+from path_progress import EndpointSettling, PathGeometry, PathProgress
 
 if TYPE_CHECKING:
     from mpc import ForceMPC
@@ -68,7 +68,7 @@ class SharedState:
             "speed": 1.0,
             "t": 0.0,
         }  # 世界系 mm 路径点
-        self._params = {
+        self._params: dict[str, Any] = {
             "fmax": cfg.MPC_FMAX_UN,
             "max_active": 6,
             "mpc_on": False,
@@ -87,6 +87,7 @@ class SharedState:
         }
         self._reference_version = 0
         self._progress = PathProgress()
+        self._settling = EndpointSettling()
         self._last_sent = [0] * 6
         # 工作线程 → 主线程
         # currents 始终使用安培；串口整数指令只存在 rec["commands"] 中。
@@ -121,12 +122,65 @@ class SharedState:
     # ---- 主线程 → 工作线程 ----
     def set_kalman(self, pos, vel, t):
         with self._lock:
+            now = self.clock()
             self._kalman = {
                 "pos": np.array(pos, float).copy(),
                 "vel": np.array(vel, float).copy(),
                 "t": t,
-                "t_mono": self.clock(),
+                "t_mono": now,
             }
+            # Observe EVERY vision publication, including excursions between
+            # worker solves. A consumed old snapshot cannot restore this dwell.
+            p, v = self._kalman["pos"], self._kalman["vel"]
+            tol = float(self._params.get("finish_tol_mm", cfg.PATH_FINISH_TOL_MM))
+            speed_tol = float(
+                self._params.get("finish_speed_mm_s", cfg.PATH_FINISH_SPEED_MM_S)
+            )
+            path = self._ref["path"]
+            eligible = bool(
+                not self._stop.is_set()
+                and self._params.get("mpc_on", False)
+                and path
+                and self._progress.holding_endpoint
+                and not self._progress.path_deviation
+                and self._progress.s_progress >= self._progress.s_total - tol
+                and np.isfinite(p).all()
+                and np.isfinite(v).all()
+                and math.isfinite(tol)
+                and tol > 0
+                and math.isfinite(speed_tol)
+                and speed_tol >= 0
+                and np.linalg.norm(p - path[-1]) <= tol
+                and np.linalg.norm(v) <= speed_tol
+                and self._worker_status == "FRESH"
+                and target_status(now - self._I_target["t_mono"]) == "FRESH"
+            )
+            self._settling.observe(now, eligible, cfg.KALMAN_STALE_S)
+            if not self._settling.ready(now, self._finish_dwell()):
+                self._progress = replace(self._progress, finished=False)
+
+    def _finish_dwell(self) -> float:
+        return float(self._params.get("finish_dwell_s", cfg.PATH_FINISH_DWELL_S))
+
+    def _reset_settling_locked(self) -> None:
+        self._settling.reset()
+        self._progress = replace(self._progress, finished=False)
+
+    def reset_settling(self) -> None:
+        """Invalidate a vision gap without changing the existing hold/stop policy."""
+        with self._lock:
+            self._reset_settling_locked()
+
+    def _expire_settling_locked(self, now: float) -> None:
+        if self._stop.is_set():
+            return  # retain a completed task's diagnostic flag after stop
+        sample = self._kalman["t_mono"]
+        if (
+            sample is None
+            or not 0 <= now - sample <= cfg.KALMAN_STALE_S
+            or target_status(now - self._I_target["t_mono"]) != "FRESH"
+        ):
+            self._reset_settling_locked()
 
     def set_reference(self, path_world_mm, speed, t):
         with self._lock:
@@ -136,6 +190,7 @@ class SharedState:
                 "t": t,
             }
             self._reference_version += 1
+            self._settling.reset()
             self._progress = PathProgress(
                 s_total=PathGeometry.from_path(path_world_mm).total
             )
@@ -149,6 +204,7 @@ class SharedState:
     def get_progress(self) -> PathProgress:
         """Return the immutable, last committed worker progress snapshot."""
         with self._lock:
+            self._expire_settling_locked(self.clock())
             return self._progress
 
     def report_path_deviation(
@@ -168,8 +224,10 @@ class SharedState:
                 return False
             if self._I_target["seq"] != expected_seq:
                 return False
+            self._settling.reset()
             self._progress = replace(
                 self._progress,
+                finished=False,
                 path_deviation=True,
                 distance_mm=distance_mm,
                 expanded_search=True,
@@ -178,6 +236,13 @@ class SharedState:
 
     def set_params(self, params: dict, t):
         with self._lock:
+            for key, default in (
+                ("finish_tol_mm", cfg.PATH_FINISH_TOL_MM),
+                ("finish_speed_mm_s", cfg.PATH_FINISH_SPEED_MM_S),
+                ("finish_dwell_s", cfg.PATH_FINISH_DWELL_S),
+            ):
+                if self._params.get(key, default) != params.get(key, default):
+                    self._reset_settling_locked()
             self._params = dict(params)
             self._params["t"] = t
             self._params["t_mono"] = self.clock()
@@ -202,11 +267,14 @@ class SharedState:
     def set_worker_status(self, status: str) -> None:
         with self._lock:
             self._worker_status = status
+            if status != "FRESH":
+                self._reset_settling_locked()
 
     def get_freshness(self) -> dict[str, Any]:
         """Monitor ages without renewing any input/target timestamp."""
         with self._lock:
             now = self.clock()
+            self._expire_settling_locked(now)
             km = self._kalman["t_mono"]
             target_age = max(0.0, now - self._I_target["t_mono"])
             return {
@@ -266,6 +334,7 @@ class SharedState:
                     return False
                 if publish_mono - input_mono > cfg.KALMAN_STALE_S:
                     self._worker_status = "STALE_INPUT"
+                    self._reset_settling_locked()
                     return False
             if expected_seq is not None and self._I_target["seq"] != expected_seq:
                 return False
@@ -275,6 +344,20 @@ class SharedState:
             ):
                 return False
             seq = self._I_target["seq"] + 1
+            self._expire_settling_locked(publish_mono)
+            if progress is not None:
+                if not progress.at_endpoint or not progress.holding_endpoint:
+                    self._settling.reset()
+                progress = replace(
+                    progress,
+                    finished=(
+                        input_mono is not None
+                        and progress.at_endpoint
+                        and progress.holding_endpoint
+                        and not progress.path_deviation
+                        and self._settling.ready(input_mono, self._finish_dwell())
+                    ),
+                )
             self._I_target = {
                 "currents": np.asarray(currents, float).copy(),
                 "seq": seq,
@@ -313,6 +396,8 @@ class SharedState:
     def set_solver_error(self, err):
         with self._lock:
             self._solver_error = err
+            if err is not None:
+                self._reset_settling_locked()
 
     def append_mpc_log(self, row):
         with self._lock:
@@ -328,7 +413,9 @@ class SharedState:
 
     # ---- 生命周期 ----
     def stop(self):
-        self._stop.set()
+        with self._lock:
+            self._stop.set()
+            self._settling.reset()
 
     def stopped(self):
         return self._stop.is_set()
@@ -360,6 +447,7 @@ class ControlWorker(threading.Thread):
         self._pending_progress = self._progress
         self._reference_version = -1
         self._finish_tol = cfg.PATH_FINISH_TOL_MM
+        self._decel_distance = cfg.PATH_END_DECEL_MM
         self._ref_arc = 0.0  # compatibility diagnostic alias of committed s_progress
         self._c_drag = 9.42
         self._mpc_signature = None
@@ -404,7 +492,7 @@ class ControlWorker(threading.Thread):
     def finished(self) -> bool:
         return self._progress.finished
 
-    def _reference_window(self, path, speed, pos, horizon=None):
+    def _reference_window(self, path, speed, pos, horizon=None, *, input_mono=None):
         """Stage a local projection; only a successful target publish commits it."""
         horizon = int(
             horizon or (self.mpc_x.N if self.mpc_x is not None else cfg.MPC_HORIZON)
@@ -418,7 +506,20 @@ class ControlWorker(threading.Thread):
             period=self.period,
             finish_tol=self._finish_tol,
         )
-        return geometry.reference(self._pending_progress, speed, self.period, horizon)
+        self._pending_progress = geometry.plan_approach(
+            self._pending_progress,
+            self._progress,
+            speed,
+            self.clock() if input_mono is None else input_mono,
+            self._decel_distance,
+        )
+        return geometry.reference(
+            self._pending_progress,
+            speed,
+            self.period,
+            horizon,
+            decel_distance=self._decel_distance,
+        )
 
     def run(self):
         next_t = time.perf_counter()
@@ -440,6 +541,7 @@ class ControlWorker(threading.Thread):
     def _step(self):
         params = self.shared.get_params()
         if not params.get("mpc_on", False):
+            self.shared.reset_settling()
             time.sleep(self.period)  # 非 MPC 模式挂起
             return
         pos, _vel, _kalman_t, kalman_mono = self.shared.get_kalman_snapshot()
@@ -461,6 +563,7 @@ class ControlWorker(threading.Thread):
             self._ref_arc = self._progress.s_progress
             self._reference_version = reference_version
         self._finish_tol = float(params.get("finish_tol_mm", cfg.PATH_FINISH_TOL_MM))
+        self._decel_distance = float(params.get("end_decel_mm", cfg.PATH_END_DECEL_MM))
         eso_d = params.get("eso_d", np.zeros(2))
         R = np.asarray(params.get("force_model_to_camera", np.eye(2)), float)
         last_sent = self.shared.get_last_sent()
@@ -479,7 +582,9 @@ class ControlWorker(threading.Thread):
 
         # MPC（输出水平力目标）
         t0 = time.perf_counter()
-        ref, vref = self._reference_window(path, speed, pos, self.mpc_x.N)
+        ref, vref = self._reference_window(
+            path, speed, pos, self.mpc_x.N, input_mono=kalman_mono
+        )
         if self._pending_progress.path_deviation:
             if self.shared.report_path_deviation(
                 self._pending_progress.distance_mm,
@@ -580,7 +685,7 @@ class ControlWorker(threading.Thread):
             if self.shared.get_freshness()["worker_status"] == "STALE_INPUT":
                 self._log_stale_input(kalman_mono)
             return
-        self._progress = self._pending_progress
+        self._progress = self.shared.get_progress()
         self._ref_arc = self._progress.s_progress
         self.shared.append_mpc_log(
             (

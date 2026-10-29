@@ -103,10 +103,13 @@ def test_previous_interval_force_not_future_target(
 
     monkeypatch.setattr(window.eso_x, "step", step)
     monkeypatch.setattr(window.eso_y, "step", step)
+    clock.now += 1 / 30
+    gui_tests.publish_camera_observation(window)
     window.mpc_track_step(1 / 30)
     assert used == [7, -4]
     previous_estimate = window.last_F_actual[:2].copy() * 1e6
     clock.now += 1 / 30
+    gui_tests.publish_camera_observation(window)
     window.mpc_track_step(1 / 30)
     np.testing.assert_array_equal(used[2:], previous_estimate)
     np.testing.assert_array_equal(window.shared.get_params()["eso_d"], [2, 2])
@@ -125,12 +128,14 @@ def test_gui_gap_preserves_force_and_off_reenable_resets(
     window.bead = bead
     window.state_pos_mm = np.array([100, 0])
     clock.now += 1 / 30
+    gui_tests.publish_camera_observation(window)
     window.mpc_track_step(1 / 30)
     assert window.z3.tolist() == [8, 0]
     window.chk_eso.setChecked(False)
     window.mpc_track_step(1 / 30)
     window.chk_eso.setChecked(True)
     window.state_pos_mm = np.array([200, 0])
+    gui_tests.publish_camera_observation(window, (200, 0))
     window.mpc_track_step(1 / 30)
     assert window.z3.tolist() == [0, 0]
     # Runtime structure switch resets ESO alone and preserves the active Kalman.
@@ -156,6 +161,7 @@ def test_first_order_toggle_is_full_reset_even_between_ticks(
     assert isinstance(window.eso_x, FirstOrderESO)
     assert window.eso_x.z2 == 0 and not window.eso_x.initialized
     window.state_pos_mm = np.array([200, 0])
+    gui_tests.publish_camera_observation(window, (200, 0))
     window.mpc_track_step(1 / 30)
     assert window.z3.tolist() == [0, 0] and window.eso_x.z1 == 200
 
@@ -207,6 +213,8 @@ def test_existing_log_fields_show_gap_and_lifecycle_reset(
     def record(dt: float) -> None:
         clock.now += dt
         window._begin_control_log_tick(clock.now, dt)
+        if window.bead is not None:
+            gui_tests.publish_camera_observation(window)
         window.mpc_track_step(dt)
         window._finish_control_log_tick(window.bead is not None)
 
@@ -248,11 +256,11 @@ def test_gui_tick_dt_clamp_preserves_force_but_is_not_watchdog_confirmation(
     before = 1000.0
     window.last_time = before
     monkeypatch.setattr(gui.time, "time", lambda: before + pause)
-    clock.now += 1 / 30
+    clock.now += pause
     window.worker._step()
     window.tick()
     assert window.z3[0] == 8
-    assert window.eso_x.z1 == window.state_pos_mm[0]
+    assert window.eso_x.z1 == window.px_to_world_mm(window.bead[:2])[0]
 
 
 def test_live_effort_mode_refresh(

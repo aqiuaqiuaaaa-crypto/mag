@@ -68,8 +68,8 @@ def test_circle_start_parent_bug(offset: float) -> None:
     candidate = project(geometry, pos, PathProgress())
     ref, vref = geometry.reference(candidate, 1.0, 0.1, 3)
     assert old_s >= geometry.total - 0.1
-    assert np.linalg.norm(old_vref[0]) == 0
-    assert np.allclose(old_ref[0], path[-1])
+    assert np.linalg.norm(old_vref[0]) < 0.3
+    assert np.linalg.norm(old_ref[0] - path[-1]) < 0.1
     assert candidate.s_progress < 0.1 and not candidate.finished
     assert np.linalg.norm(vref[0]) > 0.99
     assert np.linalg.norm(ref[0] - path[-1]) > 0.09
@@ -83,7 +83,8 @@ def test_circle_true_end_does_not_jump_back() -> None:
     previous = PathProgress(geometry.total - 0.2)
     end = project(geometry, geometry.points[-1], previous)
     assert end.s_progress > geometry.total - 1e-9
-    assert end.finished and end.target_idx == len(geometry.points) - 1
+    assert end.at_endpoint and not end.finished
+    assert end.target_idx == len(geometry.points) - 1
 
 
 @pytest.mark.parametrize(
@@ -97,7 +98,7 @@ def test_closed_polygon_start_not_finished(path: Matrix) -> None:
     geometry = PathGeometry.from_path(path)
     candidate = project(geometry, [0, 0.06], PathProgress())
     assert candidate.s_progress < 0.1 and not candidate.finished
-    assert project(geometry, path[-1], PathProgress(geometry.total - 0.2)).finished
+    assert project(geometry, path[-1], PathProgress(geometry.total - 0.2)).at_endpoint
 
 
 def test_eight_crossings_keep_branch_and_reference_continuity() -> None:
@@ -115,7 +116,7 @@ def test_eight_crossings_keep_branch_and_reference_continuity() -> None:
             max_jump = max(max_jump, float(np.linalg.norm(ref[0] - last_ref)))
         last_ref = ref[0]
         previous = candidate
-    assert previous.finished and max_jump < 0.1
+    assert previous.at_endpoint and not previous.finished and max_jump < 0.1
     print(
         f"EIGHT steps={len(path)} max_ref_jump_mm={max_jump:.12f} total={geometry.total:.12f}"
     )
@@ -188,11 +189,11 @@ def test_local_distance_boundary(offset: float, expanded: bool) -> None:
 
 def test_finish_needs_both_arc_and_endpoint() -> None:
     geometry = PathGeometry.from_path([[0, 0], [10, 0]])
-    assert not project(geometry, [10, 0.6], PathProgress(9.8)).finished
-    assert project(geometry, [9.5, 0], PathProgress(9.0)).finished
+    assert not project(geometry, [10, 0.6], PathProgress(9.8)).at_endpoint
+    assert project(geometry, [9.75, 0], PathProgress(9.0)).at_endpoint
     assert not project(
         PathGeometry.from_path(circle()), [2, 0], PathProgress()
-    ).finished
+    ).at_endpoint
 
 
 @pytest.mark.parametrize(
