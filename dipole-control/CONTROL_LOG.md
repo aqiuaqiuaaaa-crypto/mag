@@ -117,6 +117,16 @@ legacy：接受新 seq 时以当时 `last_sent*current_gain` 为 I_from，alpha 
 
 当前默认及完整证据见 [INTERPOLATION_VALIDATION.md](INTERPOLATION_VALIDATION.md)。
 
+## 路径无进展停止（2026-10-29）
+
+中途watchdog触发后，control流的既有`stale_status`记录`PATH_STALL_TIMEOUT`、
+`finished=False`，归零后保留诊断，直到显式新任务重置。它与终点的`SETTLING_TIMEOUT`
+区分；均经normal_stop逐帧归零，不是正常完成。触发时拒绝worker新目标，不能将最后
+一行worker的F/I字段当作超时后执行结果；应查看control的cmd_sent与tracking/mode。
+metadata的config记录四个PATH_STALL参数，semantics列出新状态字符串。
+没有新增CSV字段；schema_version=2及95/56列不变。计时、门槛和实机限制见
+[ENDPOINT_SETTLING.md](ENDPOINT_SETTLING.md)。
+
 ## 计数与故障
 
 正常停止排空后，每个流 `attempted = written + dropped + rejected`；无错误、无停止后额外生产时 rejected=0。CSV 中 dropped 是**写入该行之前**的累计溢出数；末尾溢出由 summary 补齐，不能只依赖最后一行。两个流共享队列，但 summary 各自计数。

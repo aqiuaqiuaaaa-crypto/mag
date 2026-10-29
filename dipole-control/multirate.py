@@ -35,7 +35,12 @@ import numpy as np
 from control_log import ControlLogger, Scalar
 from frames import cam_to_model_pos, cam_to_model_vec, model_to_cam_vec
 from numpy.typing import NDArray
-from path_progress import EndpointSettling, PathGeometry, PathProgress
+from path_progress import (
+    EndpointSettling,
+    PathGeometry,
+    PathProgress,
+    PathStallWatchdog,
+)
 
 if TYPE_CHECKING:
     from mpc import ForceMPC
@@ -88,6 +93,7 @@ class SharedState:
         self._reference_version = 0
         self._progress = PathProgress()
         self._settling = EndpointSettling()
+        self._path_stall = PathStallWatchdog()
         self._endpoint_hold_since: float | None = None
         self._endpoint_clock_last: float | None = None
         self._settling_timed_out = False
@@ -175,6 +181,7 @@ class SharedState:
         """Invalidate a vision gap without changing the existing hold/stop policy."""
         with self._lock:
             self._reset_settling_locked()
+            self._path_stall.clear_window()  # missing observation is not no motion
 
     def _expire_settling_locked(self, now: float) -> None:
         if self._stop.is_set():
@@ -186,6 +193,7 @@ class SharedState:
             or target_status(now - self._I_target["t_mono"]) != "FRESH"
         ):
             self._reset_settling_locked()
+            self._path_stall.clear_window()
         self._check_settling_timeout_locked(now)
 
     def _check_settling_timeout_locked(self, now: float) -> None:
@@ -217,6 +225,10 @@ class SharedState:
             self._expire_settling_locked(self.clock())
             return self._settling_timed_out
 
+    def path_stall_timed_out(self) -> bool:
+        with self._lock:
+            return self._path_stall.timed_out
+
     def set_reference(self, path_world_mm, speed, t):
         with self._lock:
             self._ref = {
@@ -229,6 +241,7 @@ class SharedState:
             self._endpoint_hold_since = None
             self._endpoint_clock_last = None
             self._settling_timed_out = False
+            self._path_stall = PathStallWatchdog()
             self._progress = PathProgress(
                 s_total=PathGeometry.from_path(path_world_mm).total
             )
@@ -284,6 +297,8 @@ class SharedState:
             self._params = dict(params)
             self._params["t"] = t
             self._params["t_mono"] = self.clock()
+            if not params.get("path_stall_active", False):
+                self._path_stall.clear_window()
 
     def set_last_sent(self, cmd_list):
         with self._lock:
@@ -307,6 +322,7 @@ class SharedState:
             self._worker_status = status
             if status != "FRESH":
                 self._reset_settling_locked()
+                self._path_stall.clear_window()
 
     def get_freshness(self) -> dict[str, Any]:
         """Monitor ages without renewing any input/target timestamp."""
@@ -361,6 +377,7 @@ class SharedState:
         expected_seq=None,
         progress: PathProgress | None = None,
         expected_reference: int | None = None,
+        input_pos=None,
     ) -> bool:
         with self._lock:
             publish_mono = self.clock()
@@ -373,6 +390,7 @@ class SharedState:
                 if publish_mono - input_mono > cfg.KALMAN_STALE_S:
                     self._worker_status = "STALE_INPUT"
                     self._reset_settling_locked()
+                    self._path_stall.clear_window()
                     return False
             if expected_seq is not None and self._I_target["seq"] != expected_seq:
                 return False
@@ -383,9 +401,37 @@ class SharedState:
                 return False
             seq = self._I_target["seq"] + 1
             self._expire_settling_locked(publish_mono)
-            if self._settling_timed_out:
+            if self._settling_timed_out or self._path_stall.timed_out:
                 return False
             if progress is not None:
+                if input_mono is not None and input_pos is not None:
+                    min_speed = cfg.PATH_STALL_MIN_REF_SPEED_MM_S
+                    if not math.isfinite(min_speed) or min_speed <= 0:
+                        raise ValueError("invalid path stall minimum reference speed")
+                    decel = float(
+                        self._params.get("end_decel_mm", cfg.PATH_END_DECEL_MM)
+                    )
+                    self._path_stall.observe(
+                        input_mono,
+                        progress,
+                        input_pos,
+                        eligible=bool(
+                            not self._stop.is_set()
+                            and self._params.get("mpc_on", False)
+                            and self._params.get("path_stall_active", False)
+                            and not progress.finished
+                            and not progress.path_deviation
+                            and progress.approach_s is None
+                            and progress.s_total - progress.s_progress > decel
+                            and ref_velocity is not None
+                            and np.isfinite(ref_velocity).all()
+                            and np.linalg.norm(ref_velocity) >= min_speed
+                            and 0 <= publish_mono - input_mono <= cfg.KALMAN_STALE_S
+                        ),
+                    )
+                    if self._path_stall.timed_out:
+                        self._reset_settling_locked()
+                        return False  # GUI normal_stop owns the per-frame ramp
                 if progress.holding_endpoint and self._endpoint_hold_since is None:
                     # Start only at the first accepted hold target, never at
                     # entry to the deceleration region or at solve start.
@@ -446,6 +492,7 @@ class SharedState:
             self._solver_error = err
             if err is not None:
                 self._reset_settling_locked()
+                self._path_stall.clear_window()
 
     def append_mpc_log(self, row):
         with self._lock:
@@ -464,6 +511,7 @@ class SharedState:
         with self._lock:
             self._stop.set()
             self._settling.reset()
+            self._path_stall.clear_window()
 
     def stopped(self):
         return self._stop.is_set()
@@ -728,6 +776,7 @@ class ControlWorker(threading.Thread):
             expected_seq=expected_seq,
             progress=self._pending_progress,
             expected_reference=reference_version,
+            input_pos=pos,
         )
         if not published:
             if self.shared.get_freshness()["worker_status"] == "STALE_INPUT":

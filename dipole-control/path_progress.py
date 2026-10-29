@@ -65,6 +65,81 @@ class EndpointSettling:
         )
 
 
+@dataclass
+class PathStallWatchdog:
+    """Net measured progress, never reference arc or accumulated jitter distance.
+
+    Only successive fresh accepted worker inputs earn time. A gap/ineligible
+    interval discards evidence; only a new task clears a latched failure.
+    """
+
+    since: float | None = None
+    last_sample: float | None = None
+    anchor_s: float = 0.0
+    anchor_pos: NDArray[np.float64] | None = None
+    timed_out: bool = False
+
+    def clear_window(self) -> None:
+        self.since = self.last_sample = None
+        self.anchor_s = 0.0
+        self.anchor_pos = None
+
+    def observe(
+        self,
+        sample_mono: float,
+        progress: PathProgress,
+        position: ArrayLike,
+        *,
+        eligible: bool,
+    ) -> None:
+        if self.timed_out:
+            return
+        pos = np.asarray(position, dtype=np.float64)
+        if (
+            not eligible
+            or not math.isfinite(sample_mono)
+            or not math.isfinite(progress.s_progress)
+            or pos.shape != (2,)
+            or not np.isfinite(pos).all()
+        ):
+            self.clear_window()
+            return
+        grace = cfg.PATH_STALL_STARTUP_GRACE_S
+        distance = cfg.PATH_STALL_MIN_PROGRESS_MM
+        timeout = cfg.PATH_STALL_TIMEOUT_S
+        if not (
+            math.isfinite(grace)
+            and grace >= 0
+            and math.isfinite(distance)
+            and distance > 0
+            and math.isfinite(timeout)
+            and timeout > 0
+        ):
+            raise ValueError("invalid path stall watchdog configuration")
+        if self.last_sample is not None:
+            gap = sample_mono - self.last_sample
+            if gap < 0 or gap > cfg.KALMAN_STALE_S:
+                self.clear_window()
+            elif gap == 0:
+                return  # repeated solves of one observation earn no time
+        if self.since is None:
+            self.since = sample_mono + grace
+            self.anchor_s = progress.s_progress
+            self.anchor_pos = pos.copy()
+        elif (
+            progress.s_progress - self.anchor_s >= distance
+            and self.anchor_pos is not None
+            and np.linalg.norm(pos - self.anchor_pos) >= distance
+        ):
+            # Require net forward arc AND displacement: a clipped projection
+            # can advance while repeatedly observing the same distant point.
+            self.anchor_s = progress.s_progress
+            self.anchor_pos = pos.copy()
+            self.since = max(self.since, sample_mono)
+        self.last_sample = sample_mono
+        self.timed_out = sample_mono - self.since >= timeout
+
+
 @dataclass(frozen=True, slots=True)
 class PathGeometry:
     """Existing polyline and cumulative lengths, including its lead segment."""

@@ -125,13 +125,59 @@ control、plant、worker、ESO、plant-force五份CSV，以及events、串口字
 
 所有新产物位于`C:\Users\Administrator\AppData\Local\Temp\mag-eso-b1-n5-auiadi_j`，包含开始前完整diff/文件哈希、测试命令/日志、`representative-complete/`冻结源码与逐时刻结果、`representative-exact-comparison.json`。首次代表工况运行缺少夹具要求的历史噪声核对文件，未形成完整报告；补齐只读副本后在另一个新目录完整重跑，首次记录保留。临时目录可能被系统清理，关键结果在本文保留。未连接硬件、烧录、提交或推送。
 
-### 本轮实际回归结果
+### B1/N5 首轮部分验收与专项修正（历史记录）
 
 - 新增37项：legacy调用链14项、终点超时23项，全部通过。ESO/MPC、路径、终点、停止、串口及freshness专项合计281项通过。首轮新增用例中有1项忽略了既有弧长投影限速，准备步骤未真正到达保持阶段；修正准备步骤后原断言通过，未改控制阈值。
-- 完整上位机pytest实际执行690项：**689通过、1失败**，另有10条既有绘图空图例warning。失败是原`test_real_qtimer_worker_and_metadata`按run/seq关联日志时，把真实发布目标覆盖为同序号的STALE_INPUT空目标事件。首次真实日志保留，修改前断言在同一日志上可重现失败。测试现仅以FRESH事件建目标索引，所有原目标字段比较保留，并新增stale空字段检查；修正后相关日志/freshness **30项通过**。生产日志/调度/阈值未因此修改。没有在修正后再次运行整套690项，不能称为一轮全绿的完整测试。
+- 首轮完整上位机pytest实际执行690项：**689通过、1失败**，另有10条既有绘图空图例warning。失败是原`test_real_qtimer_worker_and_metadata`按run/seq关联日志时，把真实发布目标覆盖为同序号的STALE_INPUT空目标事件。首次真实日志保留，修改前断言在同一日志上可重现失败。测试现仅以FRESH事件建目标索引，所有原目标字段比较保留，并新增stale空字段检查；修正后相关日志/freshness **30项通过**。生产日志/调度/阈值未因此修改。该阶段尚未复跑整套690项，不能将当时的专项修正称为全量通过；后续Windows完整验收见下一节。
 - L0生产路径golden：defaults和saved均通过，各2428个UART帧，证据明确记录`eso_input_adapter=none`。FirstOrderESO原失帧/生命周期测试也通过。
 - 四个既有自定义独立脚本分别6/6、25/25、18/18、8/8，共57项；它们不作为普通pytest收集，均已单独实际运行。
 - 现有watchdog/固件基础设施Python主机回归17项及127个subtests通过；实际生产watchdog C主机测试30/30场景通过。只运行主机测试，不构建或烧录目标固件，不声称实板验证。
 - offscreen GUI冒烟通过。最终Ruff、Black --check（51文件）、mypy（51源文件，沿用现有非全工程strict检查范围）通过。未安装依赖；复用现有临时QA工具路径，所有日志和缓存隔离。
 
 新增/修改测试没有删除或跳过现有用例，也未放宽任何成功、安全或性能阈值。完整首轮失败、专项复跑及静态检查的命令、返回码、时长分别保存在临时目录对应JSON和log中；日志关联的旧/新断言现场对照见`qtimer-log-join-reproduction.json`。
+
+### B1/N5 最终 Windows 完整验收（2026-10-29，路径 watchdog 之前）
+
+后续在Windows、Python 3.14、真实PySide6的offscreen GUI与内存串口/合成相机夹具下，对修正后的同一工作树重新执行全部测试。基线HEAD为`8b7acbdf9b3cbe8b8b3a202740b43e3578c7f2c1`，当时B1/N5尚未提交；随后提交为`e643f7b21700fc1ae4907214838eeb7368090154`。本轮已重新读取下列临时报告及完整pytest日志/XML，核实：
+
+- 完整pytest：**690通过、0失败、0错误、0跳过**，日志耗时955.68 s，10条既有绘图warning。包括真实Qt日志测试；这是一轮独立完整运行，不是拼接首轮和专项结果。
+- 专项复跑：306通过；四个独立脚本6+25+18+8=57通过；GUI冒烟、Ruff、Black --check和mypy通过。mypy沿用既有范围，不等同于全工程strict。
+- 690项是当时Windows工作树的收集数量，包括既有未跟踪`test_gui_normal_disconnect.py`中的2项；不能据此承诺干净检出提交也恰好收集690项。
+- 此前独立审查使用Qt/pytest替身，其收集数量和执行语义不同，不能与上述真实Qt运行混为同一验收。本工作区未提供该独立环境的完整原始报告，本节不补写其数量。
+
+核对来源：系统临时目录`C:\Users\Administrator\AppData\Local\Temp\mag-b1-n5-acceptance-aes8rzsw`中的`RESULTS.json`、`full-pytest.log`、`full-pytest.xml`及专项/脚本日志。这些是本机临时证据，**不在仓库永久保存，可能被系统清理**；本文保留结果摘要，不替代原始日志。历史689/1失败记录仍保留，最终690/0记录只覆盖后续Windows复跑。
+
+## 路径中途无进展保护（2026-10-29）
+
+本轮基线`e643f7b21700fc1ae4907214838eeb7368090154`。新增的是软件路径进度watchdog，不改变参考生成、ESO/Kalman、MPC、六路映射、插值、限幅或终点判据。
+
+| config参数 | 默认值 | 软件依据与边界 |
+|---|---:|---|
+| PATH_STALL_STARTUP_GRACE_S | 2.0 s | 给启动、估计器和执行响应留出20个名义10 Hz周期；未做实机辨识 |
+| PATH_STALL_MIN_PROGRESS_MM | 0.3 mm | 大于Kalman配置R=0.005 mm²所假定测量噪声标准差约0.071 mm的4倍；不是实测噪声或精度保证 |
+| PATH_STALL_TIMEOUT_S | 10.0 s | 最低受监控参考速度下期望前进2 mm，显著大于0.3 mm；容许短暂停顿/转弯 |
+| PATH_STALL_MIN_REF_SPEED_MM_S | 0.2 mm/s | 更低参考速度不作为卡住证据；不修改原终点速度阈值 |
+
+只在AUTO_TRACK有效、mpc_on、有效新鲜状态参与worker计算且目标通过原seq/reference/stop/freshness校验时观察。使用该worker输入快照的单调时间和`PathGeometry.project`投影得到的`s_progress`，绝不使用终点参考游标`approach_s`或非零命令来证明卡住。每次至少净前进0.3 mm，且**同一输入快照的位置相对上次有效进展位置至少移动0.3 mm**，才更新进展锚点并重置10 s预算；不累加逐帧正向变化、绝对位移或抖动距离。位置核验用于排除远处静止观测经局部投影窗口逐步前移的假进展；转弯由弧长计进展，位移门槛只作运动佐证。
+
+第一份合格样本开始2 s宽限，随后计算10 s无进展预算；持续静止、连续新鲜且名义10 Hz下最早约12 s触发。恢复有效进展只重置10 s预算，不重复赠送启动宽限。重复消费同一状态不赚取时间。参考速度低于门槛、进入2 mm终点减速区或已锁存approach、状态/目标过期、视觉失检、工作线程异常、退出有效模式均丢弃当前计时证据；恢复后从新的合格样本重新宽限。相邻消费状态的单调间隔超出0.15 s或倒退也重新建立窗口，非有限时间/位置不算静止证据。这种保守规则不从缺失数据推断卡住；持续失帧/目标过期仍由原有停止逻辑处理。
+
+超时锁存`PATH_STALL_TIMEOUT`，保持`finished=False`，拒绝后续worker目标；GUI通过既有`normal_stop()`清除tracking并停止worker，随后tick按原每帧最大9档逐步归零。不会在watchdog中直接发送零帧，也不自动重启。新tracking创建新SharedState；显式新reference重置watchdog。用户停止、急停、串口故障及MCU通信watchdog的入口和优先级不变。日志复用`stale_status`字符串列，metadata记录状态语义和配置；schema仍为2、control/worker列数不变。
+
+终点减速与终点保持不由中途watchdog判定：仍使用现有连续停稳条件和从真正holding_endpoint起算的10 s终点超时。**路径watchdog与终点10 s超时均未经过实机热安全验证**，不是绝对断电时限。实际退出还取决于GUI/worker调度、通信和逐帧归零；不替代硬件watchdog或独立热保护。
+
+当前限制：使用的是视觉校正后的估计位置及现有路径投影，不是独立真实位置传感器；持续视觉漂移或拓扑误匹配仍可能产生假进展。小于位移门槛的紧密往返/小环轨迹须单独验证；反复丢帧、低速、worker采样间隔过长会重置证据，不能据此保证总通电时长上限。实机前须验证坐标尺度、定位噪声/漂移、真实更新间隔、转弯和启动时长、停止后漂移及线圈温升，再确认这些软件候选值。
+
+### 本轮 Windows 路径 watchdog 验收结果
+
+测试在上述基线加本轮未提交修改的工作树执行，Python 3.14.4 / pytest 9.1.0、真实Qt offscreen、模拟相机/串口。没有删除、跳过或修改任何已有测试，没有调整原控制参数；四个自定义脚本仍单独执行，避免其包装器吞异常导致普通pytest给出虚假通过。
+
+- 新增`test_path_stall.py`共31项全部通过：直线、连续转弯、短暂停顿、低速与终点区、真实worker无进展、恢复预算、噪声/回退、投影无位移、缺失/过期、重复/异常时间与位置、提交竞争、新任务、GUI未完成日志、逐帧归零和三类安全停止。与原23项终点超时合跑为54通过。
+- 完整上位机pytest：**721通过、0失败、0错误、0跳过**（JUnit时间585.097 s），10条原有空图例warning。721=上述Windows历史工作树690项+新增31项，不冒充其他环境或干净检出的收集数量。
+- 独立专项复跑：**343通过**，包含路径/终点、legacy失帧、无适配器L0生产回放、FirstOrderESO原始视觉输入及gap、ESO/MPC、停止、串口、freshness与日志；没有用专项合并替代完整pytest。
+- 四个独立脚本control 6/6、solver 25/25、multirate 18/18、bead_sim 8/8，共**57通过**；GUI冒烟通过；Ruff、Black --check及mypy通过（52文件，原有检查范围，并非全工程strict）。
+- MCU watchdog/固件基础设施的既有Python主机检查17项及127 subtests通过；提取实际生产C函数的主机场景30/30通过。只编译临时主机测试程序，不构建或烧录MCU固件，不连接实物。
+
+GUI卡住测试用短时配置加速检查：0.25 s宽限、0.5 s超时，其余控制参数不变。记录中0.9 s进入STOPPING时六路仍为`[-11,-9,-8,-35,-34,-33]`，下一帧为`[-2,0,0,-26,-25,-24]`，随后按每帧不超过9档归零并进入IDLE，保持`PATH_STALL_TIMEOUT`与`finished=False`。默认2+10 s边界由实际worker确定时钟测试另行覆盖，不能把加速测试时刻当作默认触发时刻或实机测量。
+
+本轮证据位于新建系统临时目录`C:\Users\Administrator\AppData\Local\Temp\mag-path-stall-xrfq2wcv`：完整/专项JUnit XML、各命令及日志、`stall-ramp-evidence.json`、`test-input-sha256.json`、`RESULTS.json`和文件保护核验。它们不是仓库内永久归档，可能被系统清理。既有实验数据和用户设置未覆盖；本轮没有提交、推送、合并、烧录或实机控制。

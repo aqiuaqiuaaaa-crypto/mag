@@ -1879,7 +1879,7 @@ class MagneticDipoleControl(QMainWindow):
                 "path_deviation": "fresh worker projection exceeded configured path loss distance",
                 "kalman_age_ms": "monotonic age of shared input; worker row uses consumed snapshot",
                 "target_age_ms": "monotonic age of executor-checked target; latest publication if executor not run",
-                "stale_status": "FRESH / STALE_INPUT / STALE_TARGET / STALE_TARGET_TIMEOUT / SETTLING_TIMEOUT",
+                "stale_status": "FRESH / STALE_INPUT / STALE_TARGET / STALE_TARGET_TIMEOUT / SETTLING_TIMEOUT / PATH_STALL_TIMEOUT",
                 "cmd_sent": "final safety-layer command state; not a hardware delivery acknowledgement",
                 "dropped": "cumulative queue overflows across both streams before this row",
             },
@@ -3050,6 +3050,13 @@ class MagneticDipoleControl(QMainWindow):
             )
             self.normal_stop()
             return False
+        if self.shared.path_stall_timed_out():
+            self.stale_status = "PATH_STALL_TIMEOUT"
+            self.lbl_dir.setText(
+                "⚠ PATH_STALL_TIMEOUT：路径进展超时，任务未完成，正常归零"
+            )
+            self.normal_stop()
+            return False
         if progress.finished:
             self.normal_stop()
             return False
@@ -3098,6 +3105,10 @@ class MagneticDipoleControl(QMainWindow):
                 "finish_speed_mm_s": cfg.PATH_FINISH_SPEED_MM_S,
                 "finish_dwell_s": cfg.PATH_FINISH_DWELL_S,
                 "settling_timeout_s": cfg.ENDPOINT_SETTLING_TIMEOUT_S,
+                "path_stall_active": self.tracking
+                and self.mode == "AUTO_TRACK"
+                and not self.stopping
+                and not self.serial_fault,
                 "end_decel_mm": cfg.PATH_END_DECEL_MM,
                 "mpc_horizon": self.spin_mpc_horizon.value(),
                 "mpc_w_pos": self.spin_mpc_w_pos.value(),

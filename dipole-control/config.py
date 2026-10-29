@@ -98,6 +98,11 @@ PATH_FINISH_TOL_MM = 0.25  # 终点位置与剩余弧长容差 (mm)
 PATH_FINISH_SPEED_MM_S = 0.2  # 估计速度模长上限 (mm/s)
 PATH_FINISH_DWELL_S = 0.5  # 新鲜状态连续满足条件的单调时间 (s)
 ENDPOINT_SETTLING_TIMEOUT_S = 10.0  # 终点保持的暂定上限；未经实机热安全验证
+# 路径中途无进展的软件保护；不是实机热安全通电时间。
+PATH_STALL_STARTUP_GRACE_S = 2.0
+PATH_STALL_MIN_PROGRESS_MM = 0.3  # 净弧长进展且观测位置有同量级位移，避免抖动/投影爬行
+PATH_STALL_TIMEOUT_S = 10.0
+PATH_STALL_MIN_REF_SPEED_MM_S = 0.2  # 更低速及终点减速不使用中途卡住判据
 
 # ---------- ESO ----------
 ESO_MODE = "first_order"  # L3 default; "legacy" for L0; GUI checkbox supplies off
