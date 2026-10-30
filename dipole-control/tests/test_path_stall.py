@@ -133,7 +133,7 @@ def test_projection_crawling_cannot_renew_budget_without_position_movement():
 @pytest.mark.parametrize(
     "event", ["missing", "stale_input", "stale_target", "inactive"]
 )
-def test_gaps_and_inactive_mode_discard_evidence(event):
+def test_gaps_pause_evidence_but_inactive_mode_starts_a_new_window(event):
     setup = rig()
     clock, shared, worker = setup
     for t in np.arange(0, 11.875, 0.125):
@@ -152,9 +152,10 @@ def test_gaps_and_inactive_mode_discard_evidence(event):
         shared.set_params({"mpc_on": True, "path_stall_active": False}, 0)
     assert not shared.path_stall_timed_out()
     shared.set_params({"mpc_on": True, "path_stall_active": True}, 0)
-    for t in np.arange(12.5, 24.5, 0.125):
+    deadline = 24.5 if event == "inactive" else 12.75
+    for t in np.arange(12.5, deadline, 0.125):
         assert not observe(setup, float(t))
-    assert observe(setup, 24.5)
+    assert observe(setup, deadline)
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -1.0])
@@ -173,7 +174,7 @@ def test_repeated_observation_and_invalid_position_cannot_earn_time():
         watchdog.observe(0, PathProgress(), [0, 0], eligible=True)
     assert not watchdog.timed_out
     watchdog.observe(0.125, PathProgress(), [np.nan, 0], eligible=True)
-    assert watchdog.since is None
+    np.testing.assert_array_equal(watchdog.anchor_pos, [0, 0])
     watchdog.observe(20, PathProgress(), [0, 0], eligible=True)
     assert not watchdog.timed_out
 

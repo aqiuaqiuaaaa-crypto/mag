@@ -181,7 +181,7 @@ class SharedState:
         """Invalidate a vision gap without changing the existing hold/stop policy."""
         with self._lock:
             self._reset_settling_locked()
-            self._path_stall.clear_window()  # missing observation is not no motion
+            self._path_stall.pause(self._kalman["t_mono"])
 
     def _expire_settling_locked(self, now: float) -> None:
         if self._stop.is_set():
@@ -193,7 +193,13 @@ class SharedState:
             or target_status(now - self._I_target["t_mono"]) != "FRESH"
         ):
             self._reset_settling_locked()
-            self._path_stall.clear_window()
+            # A stale target pauses the clock, but the newly published fresh
+            # state may legitimately resume it when its new target commits.
+            self._path_stall.pause(
+                sample
+                if sample is None or not 0 <= now - sample <= cfg.KALMAN_STALE_S
+                else None
+            )
         self._check_settling_timeout_locked(now)
 
     def _check_settling_timeout_locked(self, now: float) -> None:
@@ -322,7 +328,7 @@ class SharedState:
             self._worker_status = status
             if status != "FRESH":
                 self._reset_settling_locked()
-                self._path_stall.clear_window()
+                self._path_stall.pause(self._kalman["t_mono"])
 
     def get_freshness(self) -> dict[str, Any]:
         """Monitor ages without renewing any input/target timestamp."""
@@ -390,7 +396,7 @@ class SharedState:
                 if publish_mono - input_mono > cfg.KALMAN_STALE_S:
                     self._worker_status = "STALE_INPUT"
                     self._reset_settling_locked()
-                    self._path_stall.clear_window()
+                    self._path_stall.pause(self._kalman["t_mono"])
                     return False
             if expected_seq is not None and self._I_target["seq"] != expected_seq:
                 return False

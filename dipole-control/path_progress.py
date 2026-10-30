@@ -69,20 +69,40 @@ class EndpointSettling:
 class PathStallWatchdog:
     """Net measured progress, never reference arc or accumulated jitter distance.
 
-    Only successive fresh accepted worker inputs earn time. A gap/ineligible
-    interval discards evidence; only a new task clears a latched failure.
+    Only successive fresh accepted worker inputs earn time. Gaps pause that
+    clock but retain the progress anchor and budget. Ineligible modes clear
+    the window; only a new task clears a latched failure.
     """
 
-    since: float | None = None
+    elapsed_s: float = 0.0
+    deadline_s: float | None = None
     last_sample: float | None = None
     anchor_s: float = 0.0
     anchor_pos: NDArray[np.float64] | None = None
     timed_out: bool = False
+    _paused: bool = False
+    _resume_after: float | None = None
 
     def clear_window(self) -> None:
-        self.since = self.last_sample = None
+        self.elapsed_s = 0.0
+        self.deadline_s = self.last_sample = None
         self.anchor_s = 0.0
         self.anchor_pos = None
+        self._paused = False
+        self._resume_after = None
+
+    def pause(self, after_sample: float | None = None) -> None:
+        """Keep evidence; reject snapshots already published before the gap.
+
+        A solver can still commit a pre-gap snapshot while its age is fresh.
+        That snapshot must not resume the clock or move the progress anchor.
+        """
+        self._paused = True
+        if after_sample is not None and math.isfinite(after_sample):
+            self._resume_after = max(
+                after_sample,
+                self._resume_after if self._resume_after is not None else after_sample,
+            )
 
     def observe(
         self,
@@ -95,14 +115,16 @@ class PathStallWatchdog:
         if self.timed_out:
             return
         pos = np.asarray(position, dtype=np.float64)
+        if not eligible:
+            self.clear_window()
+            return
         if (
-            not eligible
-            or not math.isfinite(sample_mono)
+            not math.isfinite(sample_mono)
             or not math.isfinite(progress.s_progress)
             or pos.shape != (2,)
             or not np.isfinite(pos).all()
         ):
-            self.clear_window()
+            self.pause()
             return
         grace = cfg.PATH_STALL_STARTUP_GRACE_S
         distance = cfg.PATH_STALL_MIN_PROGRESS_MM
@@ -116,14 +138,18 @@ class PathStallWatchdog:
             and timeout > 0
         ):
             raise ValueError("invalid path stall watchdog configuration")
+        if self._resume_after is not None and sample_mono <= self._resume_after:
+            return
         if self.last_sample is not None:
             gap = sample_mono - self.last_sample
-            if gap < 0 or gap > cfg.KALMAN_STALE_S:
-                self.clear_window()
-            elif gap == 0:
-                return  # repeated solves of one observation earn no time
-        if self.since is None:
-            self.since = sample_mono + grace
+            if gap <= 0:
+                if gap < 0:
+                    self.pause()
+                return  # neither replayed nor out-of-order samples are new evidence
+            if not self._paused and gap <= cfg.KALMAN_STALE_S:
+                self.elapsed_s += gap
+        if self.deadline_s is None:
+            self.deadline_s = grace + timeout
             self.anchor_s = progress.s_progress
             self.anchor_pos = pos.copy()
         elif (
@@ -135,9 +161,11 @@ class PathStallWatchdog:
             # can advance while repeatedly observing the same distant point.
             self.anchor_s = progress.s_progress
             self.anchor_pos = pos.copy()
-            self.since = max(self.since, sample_mono)
+            self.deadline_s = max(self.deadline_s, self.elapsed_s + timeout)
         self.last_sample = sample_mono
-        self.timed_out = sample_mono - self.since >= timeout
+        self._paused = False
+        self._resume_after = None
+        self.timed_out = self.elapsed_s >= self.deadline_s
 
 
 @dataclass(frozen=True, slots=True)
